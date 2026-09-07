@@ -197,3 +197,11 @@ MIT License
 - [NarutoScript](https://github.com/Elmyran/NarutoScript) — 任务流程参考
 - [Xuan-s-UltilityAutoNaruto](https://github.com/XBJF-X/Xuan-s-UltilityAutoNaruto) — 图像检测参考
 - [AzurLaneAutoScript](https://github.com/LmeSzinc/AzurLaneAutoScript) — Alas 架构参考
+
+## 文档
+
+- [任务流程参考](docs/task-flow.md)
+- [开发指南](docs/development.md)
+- [常见问题](docs/faq.md)
+- [坐标预设](assets/coord-presets.js)
+- [版本记录](CHANGELOG.md)
