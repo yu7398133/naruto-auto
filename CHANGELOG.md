@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.1 (2026-09-08)
+
+### 新增
+- 智能战斗检测：基于 canvas 像素采样，自动判断战斗结束
+- 安装页面 (install.html)：一键安装入口
+- TCGSDK 调试助手脚本 (tools/tcgsdk-debug.user.js)
+- 任务流程参考文档 (docs/task-flow.md)
+- 开发指南 (docs/development.md)
+- package.json 项目元数据
+- .gitignore
+
+### 改进
+- waitForBattle 改为智能检测，不再傻等固定时间
+- 战斗结束后多次尝试点击不同确认位置
+- 版本号更新至 0.2.1
+
 ## v0.2.0 (2026-09-08)
 
 ### 新增
