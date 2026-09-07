@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>火影忍者云游戏自动化 - 安装</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Microsoft YaHei', sans-serif; background: #0f0f23; color: #eee; }
+    .hero {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      padding: 60px 20px;
+      text-align: center;
+      border-bottom: 3px solid #e94560;
+    }
+    .hero h1 { font-size: 36px; margin-bottom: 12px; }
+    .hero h1 span { color: #e94560; }
+    .hero p { color: #aaa; font-size: 16px; max-width: 600px; margin: 0 auto; }
+    .container { max-width: 800px; margin: 0 auto; padding: 40px 20px; }
+    .step {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      position: relative;
+    }
+    .step .num {
+      position: absolute;
+      top: -15px;
+      left: 20px;
+      background: #e94560;
+      color: #fff;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 14px;
+    }
+    .step h3 { margin-bottom: 12px; color: #e94560; }
+    .step p { color: #ccc; line-height: 1.8; font-size: 14px; }
+    .step a { color: #3498db; text-decoration: none; }
+    .step a:hover { text-decoration: underline; }
+    .step code {
+      background: rgba(0,0,0,0.3);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 13px;
+      color: #f39c12;
+    }
+    .btn-install {
+      display: inline-block;
+      padding: 14px 40px;
+      background: #e94560;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s;
+      margin-top: 20px;
+    }
+    .btn-install:hover { background: #c73650; transform: translateY(-2px); }
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin: 30px 0;
+    }
+    .feat {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .feat .icon { font-size: 28px; margin-bottom: 8px; }
+    .feat .title { font-size: 13px; color: #e94560; font-weight: bold; }
+    .footer { text-align: center; padding: 30px; color: #555; font-size: 12px; }
+    .warn {
+      background: rgba(233,69,96,0.1);
+      border: 1px solid #e94560;
+      border-radius: 8px;
+      padding: 16px;
+      margin: 20px 0;
+      font-size: 13px;
+      color: #f39c12;
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>🍥 <span>火影忍者</span>云游戏自动化</h1>
+    <p>基于腾讯云游戏 TCGSDK，无需模拟器，浏览器直接运行的自动化脚本</p>
+    <a href="naruto-auto.user.js" class="btn-install">📦 一键安装脚本</a>
+  </div>
+
+  <div class="container">
+    <div class="features">
+      <div class="feat"><div class="icon">🎁</div><div class="title">10 项每日收获</div></div>
+      <div class="feat"><div class="icon">⚔️</div><div class="title">8 项日常任务</div></div>
+      <div class="feat"><div class="icon">📅</div><div class="title">5 项周常任务</div></div>
+      <div class="feat"><div class="icon">🎯</div><div class="title">坐标录制</div></div>
+      <div class="feat"><div class="icon">🔄</div><div class="title">失败重试</div></div>
+      <div class="feat"><div class="icon">⚙️</div><div class="title">可视化面板</div></div>
+    </div>
+
+    <h2 style="color:#e94560;margin-bottom:20px">安装步骤</h2>
+
+    <div class="step">
+      <div class="num">1</div>
+      <h3>安装 Tampermonkey</h3>
+      <p>
+        前往 <a href="https://www.tampermonkey.net/" target="_blank">tampermonkey.net</a> 安装浏览器扩展。<br>
+        支持 Chrome / Edge / Firefox / Safari。
+      </p>
+    </div>
+
+    <div class="step">
+      <div class="num">2</div>
+      <h3>安装脚本</h3>
+      <p>
+        点击上方「📦 一键安装脚本」按钮，Tampermonkey 会自动弹出安装确认。<br>
+        或者手动：Tampermonkey 面板 → 添加新脚本 → 粘贴 <code>naruto-auto.user.js</code> 内容 → 保存。
+      </p>
+    </div>
+
+    <div class="step">
+      <div class="num">3</div>
+      <h3>打开云游戏页面</h3>
+      <p>
+        访问 <a href="https://start.qq.com/webgame/gift-center/700724?ADTAG=10000000" target="_blank">腾讯云游戏 - 火影忍者</a><br>
+        手动登录一次（后续会自动检测登录态）。
+      </p>
+    </div>
+
+    <div class="step">
+      <div class="num">4</div>
+      <h3>开始使用</h3>
+      <p>
+        进入游戏后，右上角会出现控制面板。<br>
+        点击 <code>▶ 开始</code> 执行所有任务，或使用快捷按钮分类执行。<br>
+        点击 <code>🎯 录制</code> 可进入坐标录制模式，实时校准坐标。
+      </p>
+    </div>
+
+    <div class="warn">
+      ⚠️ <strong>注意：</strong>当前坐标为估算值，首次使用请先进入「🎯 录制」模式校准关键坐标。
+      使用坐标标定工具（<a href="tools/coord-calibrator.html" style="color:#3498db">coord-calibrator.html</a>）可离线标定。
+    </div>
+  </div>
+
+  <div class="footer">
+    naruto-auto v0.2.0 · MIT License · <a href="https://github.com/yu7398133/naruto-auto" style="color:#555">GitHub</a>
+  </div>
+</body>
+</html>
