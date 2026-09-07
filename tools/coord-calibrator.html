@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>火影忍者自动化 - 坐标标定工具</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Microsoft YaHei', sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(90deg, #e94560, #0f3460);
+      padding: 15px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 18px; }
+    .header .info { font-size: 12px; opacity: 0.8; }
+    .container {
+      display: flex;
+      gap: 20px;
+      padding: 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .canvas-area {
+      flex: 1;
+      position: relative;
+    }
+    .canvas-wrapper {
+      position: relative;
+      border: 2px solid #e94560;
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+    #mainCanvas {
+      display: block;
+      width: 100%;
+      background: #111;
+    }
+    .sidebar {
+      width: 300px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .card h3 {
+      font-size: 13px;
+      color: #e94560;
+      margin-bottom: 8px;
+    }
+    .coord-display {
+      font-family: monospace;
+      font-size: 24px;
+      text-align: center;
+      padding: 10px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+    .coord-display span { color: #e94560; }
+    .input-group {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: center;
+    }
+    .input-group label {
+      font-size: 12px;
+      width: 30px;
+      text-align: right;
+      color: #888;
+    }
+    .input-group input {
+      flex: 1;
+      padding: 6px 8px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      color: #eee;
+      font-size: 13px;
+    }
+    .input-group input:focus {
+      outline: none;
+      border-color: #e94560;
+    }
+    .btn {
+      padding: 8px 16px;
+      border: 1px solid #e94560;
+      background: transparent;
+      color: #e94560;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+    .btn:hover {
+      background: #e94560;
+      color: #fff;
+    }
+    .btn.primary {
+      background: #e94560;
+      color: #fff;
+    }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .coord-list {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .coord-item {
+      display: flex;
+      align-items: center;
+      padding: 4px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .coord-item:hover {
+      background: rgba(233,69,96,0.1);
+    }
+    .coord-item .name {
+      flex: 1;
+      font-family: monospace;
+    }
+    .coord-item .pos {
+      color: #888;
+      font-family: monospace;
+      margin-left: 8px;
+    }
+    .coord-item .delete {
+      color: #e74c3c;
+      cursor: pointer;
+      margin-left: 8px;
+      font-size: 14px;
+    }
+    .export-area {
+      width: 100%;
+      height: 100px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      color: #eee;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      resize: vertical;
+    }
+    .upload-area {
+      border: 2px dashed #0f3460;
+      border-radius: 8px;
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .upload-area:hover {
+      border-color: #e94560;
+    }
+    .upload-area.dragover {
+      border-color: #e94560;
+      background: rgba(233,69,96,0.1);
+    }
+    .crosshair-h, .crosshair-v {
+      position: absolute;
+      background: rgba(233, 69, 96, 0.5);
+      pointer-events: none;
+      z-index: 10;
+    }
+    .crosshair-h {
+      height: 1px;
+      left: 0;
+      right: 0;
+    }
+    .crosshair-v {
+      width: 1px;
+      top: 0;
+      bottom: 0;
+    }
+    .dot-marker {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      background: #e94560;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 20;
+    }
+    .dot-label {
+      position: absolute;
+      font-size: 10px;
+      color: #fff;
+      background: rgba(233,69,96,0.8);
+      padding: 1px 4px;
+      border-radius: 2px;
+      pointer-events: none;
+      z-index: 20;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🍥 火影忍者自动化 - 坐标标定工具</h1>
+    <div class="info">基准分辨率: 1280 × 720</div>
+  </div>
+
+  <div class="container">
+    <div class="canvas-area">
+      <!-- 截图上传 -->
+      <div class="card" id="uploadCard">
+        <div class="upload-area" id="uploadArea">
+          <p>📁 拖拽截图到此处，或点击选择文件</p>
+          <p style="font-size:11px;color:#888;margin-top:8px">支持 PNG / JPG，建议 1280×720 分辨率</p>
+          <input type="file" id="fileInput" accept="image/*" style="display:none">
+        </div>
+      </div>
+
+      <!-- 画布 -->
+      <div class="card" id="canvasCard" style="display:none">
+        <div class="canvas-wrapper" id="canvasWrapper">
+          <canvas id="mainCanvas" width="1280" height="720"></canvas>
+          <div class="crosshair-h" id="crossH"></div>
+          <div class="crosshair-v" id="crossV"></div>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:#888">
+          点击画布标记坐标 · 右键取消标记 · 滚轮缩放
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <!-- 当前坐标 -->
+      <div class="card">
+        <h3>📍 当前坐标</h3>
+        <div class="coord-display">
+          X: <span id="curX">---</span> &nbsp; Y: <span id="curY">---</span>
+        </div>
+        <div class="input-group">
+          <label>名称</label>
+          <input type="text" id="coordName" placeholder="如: main.adventure">
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" id="btnAdd">添加标记</button>
+          <button class="btn" id="btnUndo">撤销</button>
+        </div>
+      </div>
+
+      <!-- 手动输入 -->
+      <div class="card">
+        <h3>✏️ 手动输入</h3>
+        <div class="input-group">
+          <label>X</label>
+          <input type="number" id="manualX" placeholder="0-1280">
+        </div>
+        <div class="input-group">
+          <label>Y</label>
+          <input type="number" id="manualY" placeholder="0-720">
+        </div>
+        <div class="input-group">
+          <label>名称</label>
+          <input type="text" id="manualName" placeholder="如: common.confirm">
+        </div>
+        <button class="btn" id="btnManualAdd" style="width:100%">添加</button>
+      </div>
+
+      <!-- 标记列表 -->
+      <div class="card">
+        <h3>📋 标记列表 (<span id="markCount">0</span>)</h3>
+        <div class="coord-list" id="coordList"></div>
+        <div class="btn-row">
+          <button class="btn" id="btnClearAll">清空</button>
+          <button class="btn primary" id="btnExport">导出 JS</button>
+        </div>
+      </div>
+
+      <!-- 导出 -->
+      <div class="card">
+        <h3>📤 导出结果</h3>
+        <textarea class="export-area" id="exportArea" readonly placeholder="点击「导出 JS」生成坐标代码..."></textarea>
+        <button class="btn" id="btnCopy" style="width:100%;margin-top:8px">复制到剪贴板</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('mainCanvas');
+    const ctx = canvas.getContext('2d');
+    const wrapper = document.getElementById('canvasWrapper');
+    const crossH = document.getElementById('crossH');
+    const crossV = document.getElementById('crossV');
+
+    let marks = [];
+    let currentCoord = { x: 0, y: 0 };
+    let imageLoaded = false;
+
+    // === 文件上传 ===
+    const uploadArea = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+
+    uploadArea.addEventListener('click', () => fileInput.click());
+    uploadArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadArea.classList.add('dragover');
+    });
+    uploadArea.addEventListener('dragleave', () => {
+      uploadArea.classList.remove('dragover');
+    });
+    uploadArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadArea.classList.remove('dragover');
+      if (e.dataTransfer.files[0]) loadImage(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) loadImage(e.target.files[0]);
+    });
+
+    function loadImage(file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          imageLoaded = true;
+          document.getElementById('uploadCard').style.display = 'none';
+          document.getElementById('canvasCard').style.display = 'block';
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // === 画布交互 ===
+    function getCanvasCoord(e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return {
+        x: Math.round((e.clientX - rect.left) * scaleX),
+        y: Math.round((e.clientY - rect.top) * scaleY),
+      };
+    }
+
+    wrapper.addEventListener('mousemove', (e) => {
+      const coord = getCanvasCoord(e);
+      currentCoord = coord;
+      document.getElementById('curX').textContent = coord.x;
+      document.getElementById('curY').textContent = coord.y;
+
+      // 十字线
+      const rect = wrapper.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      crossH.style.top = py + 'px';
+      crossV.style.left = px + 'px';
+    });
+
+    wrapper.addEventListener('click', (e) => {
+      const coord = getCanvasCoord(e);
+      currentCoord = coord;
+      document.getElementById('curX').textContent = coord.x;
+      document.getElementById('curY').textContent = coord.y;
+
+      // 如果有名称，自动添加
+      const nameInput = document.getElementById('coordName');
+      if (nameInput.value.trim()) {
+        addMark(nameInput.value.trim(), coord.x, coord.y);
+        nameInput.value = '';
+      }
+    });
+
+    wrapper.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      // 右键删除最近的标记
+      const coord = getCanvasCoord(e);
+      let minDist = Infinity;
+      let minIdx = -1;
+      marks.forEach((m, i) => {
+        const dist = Math.hypot(m.x - coord.x, m.y - coord.y);
+        if (dist < minDist) { minDist = dist; minIdx = i; }
+      });
+      if (minIdx >= 0 && minDist < 30) {
+        marks.splice(minIdx, 1);
+        redrawCanvas();
+        updateList();
+      }
+    });
+
+    // === 标记管理 ===
+    function addMark(name, x, y) {
+      marks.push({ name, x, y });
+      redrawCanvas();
+      updateList();
+    }
+
+    function redrawCanvas() {
+      if (!imageLoaded) return;
+      // 重绘图片（从缓存）
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
+        // 画标记
+        marks.forEach((m, i) => {
+          const px = m.x * canvas.width / canvas.width;
+          const py = m.y * canvas.height / canvas.height;
+
+          // 点
+          ctx.beginPath();
+          ctx.arc(px, py, 6, 0, Math.PI * 2);
+          ctx.fillStyle = '#e94560';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+
+          // 标签
+          ctx.font = '11px Microsoft YaHei';
+          ctx.fillStyle = 'rgba(233,69,96,0.9)';
+          const textW = ctx.measureText(m.name).width;
+          ctx.fillRect(px + 10, py - 14, textW + 8, 18);
+          ctx.fillStyle = '#fff';
+          ctx.fillText(m.name, px + 14, py);
+        });
+      };
+      img.src = canvas.toDataURL();
+    }
+
+    function updateList() {
+      document.getElementById('markCount').textContent = marks.length;
+      const list = document.getElementById('coordList');
+      list.innerHTML = marks.map((m, i) =>
+        `<div class="coord-item" data-idx="${i}">
+          <span class="name">${m.name}</span>
+          <span class="pos">(${m.x}, ${m.y})</span>
+          <span class="delete" data-idx="${i}">×</span>
+        </div>`
+      ).join('');
+
+      // 删除
+      list.querySelectorAll('.delete').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const idx = parseInt(e.target.dataset.idx);
+          marks.splice(idx, 1);
+          redrawCanvas();
+          updateList();
+        });
+      });
+
+      // 点击跳转
+      list.querySelectorAll('.coord-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+          if (e.target.classList.contains('delete')) return;
+          const idx = parseInt(item.dataset.idx);
+          const m = marks[idx];
+          // 高亮显示
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, 15, 0, Math.PI * 2);
+          ctx.strokeStyle = '#f39c12';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          setTimeout(() => redrawCanvas(), 1000);
+        });
+      });
+    }
+
+    // === 按钮事件 ===
+    document.getElementById('btnAdd').addEventListener('click', () => {
+      const name = document.getElementById('coordName').value.trim();
+      if (!name) { alert('请输入坐标名称'); return; }
+      addMark(name, currentCoord.x, currentCoord.y);
+      document.getElementById('coordName').value = '';
+    });
+
+    document.getElementById('btnUndo').addEventListener('click', () => {
+      marks.pop();
+      redrawCanvas();
+      updateList();
+    });
+
+    document.getElementById('btnManualAdd').addEventListener('click', () => {
+      const x = parseInt(document.getElementById('manualX').value);
+      const y = parseInt(document.getElementById('manualY').value);
+      const name = document.getElementById('manualName').value.trim();
+      if (isNaN(x) || isNaN(y) || !name) { alert('请填写完整信息'); return; }
+      addMark(name, x, y);
+      document.getElementById('manualX').value = '';
+      document.getElementById('manualY').value = '';
+      document.getElementById('manualName').value = '';
+    });
+
+    document.getElementById('btnClearAll').addEventListener('click', () => {
+      if (confirm('确定清空所有标记？')) {
+        marks = [];
+        redrawCanvas();
+        updateList();
+        document.getElementById('exportArea').value = '';
+      }
+    });
+
+    document.getElementById('btnExport').addEventListener('click', () => {
+      // 按类别分组
+      const groups = {};
+      marks.forEach(m => {
+        const parts = m.name.split('.');
+        const group = parts.length > 1 ? parts[0] : 'misc';
+        const key = parts.length > 1 ? parts.slice(1).join('.') : parts[0];
+        if (!groups[group]) groups[group] = [];
+        groups[group].push({ key, x: m.x, y: m.y });
+      });
+
+      let code = '// === 自动生成的坐标定义 ===\n';
+      code += `// 基准分辨率: ${canvas.width} × ${canvas.height}\n`;
+      code += `// 生成时间: ${new Date().toLocaleString()}\n\n`;
+
+      for (const [group, items] of Object.entries(groups)) {
+        code += `// ${group}\n`;
+        code += `COORDS.${group} = {\n`;
+        items.forEach(item => {
+          code += `  ${item.key}: { x: ${item.x}, y: ${item.y} },\n`;
+        });
+        code += '};\n\n';
+      }
+
+      document.getElementById('exportArea').value = code;
+    });
+
+    document.getElementById('btnCopy').addEventListener('click', () => {
+      const textarea = document.getElementById('exportArea');
+      textarea.select();
+      document.execCommand('copy');
+      alert('已复制到剪贴板');
+    });
+  </script>
+</body>
+</html>
