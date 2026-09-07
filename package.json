@@ -1,0 +1,20 @@
+{
+  "name": "naruto-auto",
+  "version": "0.2.1",
+  "description": "火影忍者云游戏自动化脚本 - 基于TCGSDK",
+  "author": "naruto-auto",
+  "license": "MIT",
+  "homepage": "https://github.com/yu7398133/naruto-auto",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yu7398133/naruto-auto.git"
+  },
+  "keywords": [
+    "naruto",
+    "火影忍者",
+    "automation",
+    "tcgsdk",
+    "cloud-gaming",
+    "tampermonkey"
+  ]
+}

@@ -21,7 +21,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -296,6 +296,143 @@
     isHomeScreen() {
       // 降级：总是返回 true，由任务流程保证
       return true;
+    }
+  }
+
+  // ============================================================
+  //  BattleDetector — 战斗状态检测
+  // ============================================================
+  class BattleDetector {
+    constructor(operator) {
+      this.op = operator;
+      this.samplePoints = [
+        // 战斗结束确认按钮区域（中央偏下）
+        { x: 640, y: 550, label: 'confirm' },
+        // 跳过按钮区域（右上）
+        { x: 1200, y: 50, label: 'skip' },
+        // 奖励领取区域
+        { x: 640, y: 500, label: 'reward' },
+      ];
+      this.prevSamples = null;
+      this.stableCount = 0;  // 连续稳定帧数
+    }
+
+    /**
+     * 通过 canvas 像素采样检测画面变化
+     * 如果连续多帧画面无变化，可能已到结算界面
+     */
+    async sampleCanvas() {
+      try {
+        const canvas = document.querySelector('canvas');
+        if (!canvas) return null;
+
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return null;
+
+        // 采样关键区域的像素
+        const samples = [];
+        for (const pt of this.samplePoints) {
+          const sx = Math.round(pt.x * canvas.width / BASE_W);
+          const sy = Math.round(pt.y * canvas.height / BASE_H);
+          try {
+            const pixel = ctx.getImageData(sx, sy, 1, 1).data;
+            samples.push({
+              x: pt.x, y: pt.y,
+              r: pixel[0], g: pixel[1], b: pixel[2],
+              label: pt.label
+            });
+          } catch (e) {
+            // getImageData 可能被 CORS 限制
+            return null;
+          }
+        }
+        return samples;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /**
+     * 比较两次采样是否一致（画面静止）
+     */
+    compareSamples(a, b) {
+      if (!a || !b || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        const diff = Math.abs(a[i].r - b[i].r) +
+                     Math.abs(a[i].g - b[i].g) +
+                     Math.abs(a[i].b - b[i].b);
+        if (diff > 30) return false; // 颜色差异阈值
+      }
+      return true;
+    }
+
+    /**
+     * 智能等待战斗结束
+     * 策略：
+     * 1. 优先尝试像素采样（画面静止 = 战斗结束）
+     * 2. 降级为固定延时 + 多次点击确认
+     */
+    async waitForBattleEnd(cfg, popupHandler) {
+      const maxWait = cfg.get('delay.battle.max') || 120000;
+      const minWait = cfg.get('delay.battle.min') || 30000;
+      const pollInterval = 2000;
+
+      Utils.log('info', '    ⏳ 等待战斗结束...');
+
+      // 阶段1：最少等待 minWait
+      await Utils.sleep(minWait);
+
+      // 阶段2：尝试像素检测
+      const start = Date.now();
+      let lastSample = await this.sampleCanvas();
+      let stableFrames = 0;
+      const STABLE_THRESHOLD = 3; // 连续3帧静止认为结束
+
+      while (Date.now() - start < maxWait) {
+        await Utils.sleep(pollInterval);
+
+        const sample = await this.sampleCanvas();
+        if (sample && lastSample) {
+          if (this.compareSamples(sample, lastSample)) {
+            stableFrames++;
+            Utils.log('debug', `    画面稳定 ${stableFrames}/${STABLE_THRESHOLD}`);
+            if (stableFrames >= STABLE_THRESHOLD) {
+              Utils.log('info', '    ✓ 检测到画面静止，判定战斗结束');
+              break;
+            }
+          } else {
+            stableFrames = 0; // 画面还在动，重置计数
+          }
+        }
+        lastSample = sample;
+
+        // 超时保护
+        if (Date.now() - start >= maxWait) {
+          Utils.log('warn', '    ⚠ 等待超时，强制继续');
+          break;
+        }
+      }
+
+      // 阶段3：尝试点击确认（多次尝试不同位置）
+      Utils.log('info', '    尝试点击确认...');
+      const confirmPositions = [
+        { x: 640, y: 550 },  // 战斗结束确认
+        { x: 640, y: 500 },  // 奖励确认
+        { x: 640, y: 400 },  // 点击继续
+        { x: 1100, y: 600 }, // 底部确认按钮
+      ];
+
+      for (let round = 0; round < 3; round++) {
+        for (const pos of confirmPositions) {
+          await this.op.clickNatural(pos.x, pos.y, 10);
+          await Utils.randomDelay(600, 1000);
+        }
+        // 关闭可能的弹窗
+        await popupHandler.dismissQuick();
+        await Utils.sleep(500);
+      }
+
+      Utils.log('info', '    ✓ 战斗结算处理完成');
     }
   }
 
@@ -849,15 +986,20 @@
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
     }
 
-    async waitForBattle(op, cfg, maxMs) {
-      const wait = maxMs || cfg.get('delay.battle.max') || 120000;
-      Utils.log('info', `    ⏳ 等待战斗 (${Math.round(wait/1000)}s)...`);
-      await Utils.sleep(wait);
-      // 战斗结束后点击
-      await op.clickNatural(COORDS.battle.battleEnd.x, COORDS.battle.battleEnd.y);
-      await Utils.randomDelay(1000, 2000);
-      await this.confirm(op);
-      await this.tapAny(op);
+    async waitForBattle(op, cfg, popupHandler, maxMs) {
+      // 使用智能战斗检测
+      if (this._battleDetector) {
+        await this._battleDetector.waitForBattleEnd(cfg, popupHandler);
+      } else {
+        // 降级：固定延时
+        const wait = maxMs || cfg.get('delay.battle.max') || 120000;
+        Utils.log('info', `    ⏳ 等待战斗 (${Math.round(wait/1000)}s)...`);
+        await Utils.sleep(wait);
+        await op.clickNatural(COORDS.battle.battleEnd.x, COORDS.battle.battleEnd.y);
+        await Utils.randomDelay(1000, 2000);
+        await this.confirm(op);
+        await this.tapAny(op);
+      }
     }
 
     async goAdventure(op, cfg) {
@@ -1007,7 +1149,7 @@
       await this.goAdventure(op, cfg);
       await this.navigateTo(op, COORDS.daily.abundanceEntry, cfg);
       await this.navigateTo(op, COORDS.daily.abundanceChallenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1019,7 +1161,7 @@
       await this.goAdventure(op, cfg);
       await this.navigateTo(op, COORDS.daily.squadEntry, cfg);
       await this.navigateTo(op, COORDS.daily.squadChallenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1031,7 +1173,7 @@
       await this.goAdventure(op, cfg);
       await this.navigateTo(op, COORDS.daily.survivalEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1070,7 +1212,7 @@
       await this.goAdventure(op, cfg);
       await this.navigateTo(op, COORDS.daily.secretEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1097,7 +1239,7 @@
       await popup.dismissQuick();
       await this.navigateTo(op, COORDS.weekly.practiceEntry, cfg);
       await this.navigateTo(op, COORDS.weekly.practiceStart, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1108,7 +1250,7 @@
       await popup.dismissQuick();
       await this.navigateTo(op, COORDS.weekly.akatsukiEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1119,7 +1261,7 @@
       await popup.dismissQuick();
       await this.navigateTo(op, COORDS.weekly.rebelEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1130,7 +1272,7 @@
       await popup.dismissQuick();
       await this.navigateTo(op, COORDS.weekly.fortressEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1141,7 +1283,7 @@
       await popup.dismissQuick();
       await this.navigateTo(op, COORDS.weekly.heavenEntry, cfg);
       await this.navigateTo(op, COORDS.common.challenge, cfg);
-      await this.waitForBattle(op, cfg);
+      await this.waitForBattle(op, cfg, popup);
       await this.back(op);
     }
   }
@@ -1455,10 +1597,14 @@
       this.operator = new GameOperator();
       this.cookieMgr = new CookieManager();
       this.sceneDetector = new SceneDetector();
+      this.battleDetector = new BattleDetector(this.operator);
       this.popupHandler = new PopupHandler(this.operator, this.config);
       this.scheduler = new TaskScheduler(this.operator, this.config, this.popupHandler);
       this.coordRecorder = new CoordRecorder();
       this.panel = new ControlPanel(this.scheduler, this.config, this.coordRecorder);
+
+      // 让 BaseTask 能访问 battleDetector
+      BaseTask.prototype._battleDetector = this.battleDetector;
     }
 
     async init() {
