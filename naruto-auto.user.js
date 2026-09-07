@@ -1,15 +1,17 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
-// @namespace    https://github.com/naruto-auto
-// @version      0.1.0
+// @namespace    https://github.com/yu7398133/naruto-auto
+// @version      0.2.0
 // @description  基于TCGSDK的火影忍者手游云游戏自动化脚本
 // @author       naruto-auto
 // @match        https://start.qq.com/*
 // @match        https://gamer.qq.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @grant        GM_addStyle
 // @grant        GM_log
+// @grant        GM_cookie
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -17,144 +19,131 @@
   'use strict';
 
   // ============================================================
-  //  utils.js — 工具函数
+  //  常量
+  // ============================================================
+  const VERSION = '0.2.0';
+  const BASE_W = 1280;
+  const BASE_H = 720;
+  const STORAGE_PREFIX = 'naruto_auto_';
+
+  // ============================================================
+  //  Utils — 工具函数
   // ============================================================
   const Utils = {
     sleep(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
     },
 
+    random(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    },
+
     randomDelay(min, max) {
-      const delay = Math.floor(Math.random() * (max - min + 1)) + min;
-      return this.sleep(delay);
+      return this.sleep(this.random(min, max));
     },
 
     log(level, ...args) {
       const ts = new Date().toLocaleTimeString();
       const prefix = `[NarutoAuto][${ts}]`;
-      if (level === 'error') console.error(prefix, ...args);
-      else if (level === 'warn') console.warn(prefix, ...args);
-      else console.log(prefix, ...args);
+      const fn = level === 'error' ? console.error :
+                 level === 'warn' ? console.warn : console.log;
+      fn(prefix, ...args);
+      // 推送到 UI 日志
+      if (window.__narutoAuto?.panel) {
+        window.__narutoAuto.panel.addLog(level, args.join(' '));
+      }
     },
 
-    waitForCondition(fn, timeout = 10000, interval = 500) {
-      return new Promise((resolve, reject) => {
-        const start = Date.now();
-        const check = () => {
-          try {
-            const result = fn();
-            if (result) return resolve(result);
-          } catch (e) { /* ignore */ }
-          if (Date.now() - start > timeout) return reject(new Error('waitForCondition timeout'));
-          setTimeout(check, interval);
-        };
-        check();
-      });
-    },
-
-    getTimestamp() {
-      return new Date().toISOString().replace('T', ' ').slice(0, 19);
+    async waitFor(fn, timeout = 10000, interval = 500) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        try {
+          const result = fn();
+          if (result) return result;
+        } catch (e) { /* ignore */ }
+        await this.sleep(interval);
+      }
+      throw new Error(`waitFor timeout (${timeout}ms)`);
     },
 
     formatDuration(ms) {
       const s = Math.floor(ms / 1000);
-      const m = Math.floor(s / 60);
-      const sec = s % 60;
-      return `${m}分${sec}秒`;
+      return `${Math.floor(s / 60)}分${s % 60}秒`;
+    },
+
+    clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
     }
   };
 
   // ============================================================
-  //  config.js — 配置管理
+  //  Config — 配置管理
   // ============================================================
   const DEFAULT_CONFIG = {
-    version: '0.1.0',
-    // 基准分辨率
-    baseResolution: { width: 1280, height: 720 },
-    // 操作延时范围 (ms)
+    version: VERSION,
+    baseResolution: { width: BASE_W, height: BASE_H },
     delay: {
-      click: { min: 300, max: 600 },       // 点击后等待
-      pageLoad: { min: 1500, max: 3000 },   // 页面加载
-      battle: { min: 30000, max: 90000 },   // 战斗等待
-      short: { min: 500, max: 1000 },       // 短等待
-      long: { min: 3000, max: 5000 },       // 长等待
+      click:     { min: 400, max: 800 },
+      pageLoad:  { min: 2000, max: 4000 },
+      battle:    { min: 30000, max: 120000 },
+      short:     { min: 600, max: 1200 },
+      long:      { min: 3000, max: 6000 },
+      popup:     { min: 800, max: 1500 },
     },
-    // 重试配置
-    retry: {
-      maxAttempts: 3,
-      interval: 2000,
-    },
-    // 任务开关（默认全部开启）
+    retry: { maxAttempts: 3, interval: 2000 },
+    sceneTimeout: 15000,    // 场景切换超时
+    autoDismissPopup: true, // 自动关闭弹窗
     taskSwitches: {
       // 每日收获
-      collectGold: true,       // 招财
-      collectMail: true,       // 邮件
-      collectSign: true,       // 签到
-      shareDaily: true,        // 每日分享
-      sendStamina: true,       // 赠送体力
-      collectIntel: true,      // 情报社
-      collectRank: true,       // 排行榜
-      collectActive: true,     // 活跃度宝箱
-      collectNinjutsu: true,   // 忍法帖
-      recruit: true,           // 招募
+      collectGold: true, collectMail: true, collectSign: true,
+      shareDaily: true, sendStamina: true, collectIntel: true,
+      collectRank: true, collectActive: true, collectNinjutsu: true,
+      recruit: true,
       // 每日任务
-      squadRaid: true,         // 小队突袭
-      abundanceRoom: true,     // 丰饶之间
-      orgBlessing: true,       // 组织祈福
-      survivalTrial: true,     // 生存试炼
-      equipSweep: true,        // 装备扫荡
-      missionHall: true,       // 任务集会所
-      secretRealm: true,       // 秘境挑战
-      shopBuy: true,           // 商店购买
+      squadRaid: true, abundanceRoom: true, orgBlessing: true,
+      survivalTrial: true, equipSweep: true, missionHall: true,
+      secretRealm: true, shopBuy: true,
       // 周常
-      roadOfPractice: false,   // 修行之路
-      chaseAkatsuki: false,    // 追击晓组织
-      rebelNinja: false,       // 叛忍来袭
-      orgFortress: false,      // 组织要塞
-      heavenEarth: false,      // 天地战场
+      roadOfPractice: false, chaseAkatsuki: false, rebelNinja: false,
+      orgFortress: false, heavenEarth: false,
     },
-    // 运行模式
-    mode: 'auto', // auto | manual
     debug: false,
   };
 
   class Config {
     constructor() {
-      this.data = this.load();
+      this.data = this._load();
     }
 
-    load() {
+    _load() {
       try {
-        const saved = GM_getValue('naruto_config', null);
-        if (saved) {
-          return this.merge(DEFAULT_CONFIG, JSON.parse(saved));
-        }
+        const saved = GM_getValue(STORAGE_PREFIX + 'config', null);
+        if (saved) return this._merge(structuredClone(DEFAULT_CONFIG), JSON.parse(saved));
       } catch (e) {
-        Utils.log('warn', '配置加载失败，使用默认配置', e);
+        Utils.log('warn', '配置加载失败，使用默认值', e);
       }
-      return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+      return structuredClone(DEFAULT_CONFIG);
     }
 
     save() {
-      GM_setValue('naruto_config', JSON.stringify(this.data));
+      GM_setValue(STORAGE_PREFIX + 'config', JSON.stringify(this.data));
     }
 
-    merge(defaults, overrides) {
-      const result = JSON.parse(JSON.stringify(defaults));
-      for (const key of Object.keys(overrides)) {
-        if (overrides[key] !== undefined && overrides[key] !== null) {
-          if (typeof overrides[key] === 'object' && !Array.isArray(overrides[key]) && result[key]) {
-            result[key] = this.merge(result[key], overrides[key]);
+    _merge(base, over) {
+      for (const k of Object.keys(over)) {
+        if (over[k] !== undefined && over[k] !== null) {
+          if (typeof over[k] === 'object' && !Array.isArray(over[k]) && base[k]) {
+            this._merge(base[k], over[k]);
           } else {
-            result[key] = overrides[key];
+            base[k] = over[k];
           }
         }
       }
-      return result;
+      return base;
     }
 
     get(path) {
-      return path.split('.').reduce((o, k) => o && o[k], this.data);
+      return path.split('.').reduce((o, k) => o?.[k], this.data);
     }
 
     set(path, value) {
@@ -166,170 +155,439 @@
     }
 
     reset() {
-      this.data = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+      this.data = structuredClone(DEFAULT_CONFIG);
       this.save();
     }
   }
 
   // ============================================================
-  //  operator.js — TCGSDK 操作封装层
+  //  CookieManager — 登录态管理
+  // ============================================================
+  class CookieManager {
+    constructor() {
+      this.loginChecked = false;
+      this.isLoggedIn = false;
+    }
+
+    /**
+     * 检查是否已登录（通过检测页面特征）
+     */
+    checkLoginState() {
+      // 检测常见登录态标志
+      const hasCookie = document.cookie.includes('uin') ||
+                        document.cookie.includes('skey') ||
+                        document.cookie.includes('pskey');
+
+      // 检测页面是否有游戏入口（而非登录按钮）
+      const hasLoginBtn = document.querySelector('[class*="login"]') ||
+                          document.querySelector('[class*="Login"]') ||
+                          document.querySelector('button')?.textContent?.includes('登录');
+
+      this.isLoggedIn = hasCookie && !hasLoginBtn;
+      this.loginChecked = true;
+
+      Utils.log('info', `登录态检测: ${this.isLoggedIn ? '已登录' : '未登录'} (Cookie: ${hasCookie}, 登录按钮: ${!!hasLoginBtn})`);
+      return this.isLoggedIn;
+    }
+
+    /**
+     * 显示登录提醒
+     */
+    showLoginAlert() {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = `
+        position:fixed;top:0;left:0;right:0;bottom:0;
+        background:rgba(0,0,0,0.8);z-index:999998;
+        display:flex;align-items:center;justify-content:center;
+      `;
+      overlay.innerHTML = `
+        <div style="background:#1a1a2e;border:2px solid #e94560;border-radius:16px;padding:40px;text-align:center;max-width:400px">
+          <h2 style="color:#e94560;margin-bottom:16px">⚠️ 需要登录</h2>
+          <p style="color:#ccc;margin-bottom:20px;font-size:14px">
+            检测到未登录状态，请先手动登录云游戏平台。
+            <br>登录后刷新页面即可自动运行。
+          </p>
+          <button onclick="location.reload()" style="
+            padding:10px 30px;background:#e94560;color:#fff;
+            border:none;border-radius:8px;cursor:pointer;font-size:14px
+          ">🔄 刷新页面</button>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+    }
+
+    /**
+     * 等待登录完成
+     */
+    async waitForLogin(maxWait = 120000) {
+      const start = Date.now();
+      while (Date.now() - start < maxWait) {
+        if (this.checkLoginState()) return true;
+        await Utils.sleep(3000);
+      }
+      return false;
+    }
+  }
+
+  // ============================================================
+  //  SceneDetector — 场景检测
+  // ============================================================
+  const SCENES = {
+    UNKNOWN:    'unknown',
+    LOADING:    'loading',
+    HOME:       'home',        // 主界面
+    ADVENTURE:  'adventure',   // 冒险界面
+    BATTLE:     'battle',      // 战斗中
+    BATTLE_END: 'battle_end',  // 战斗结束
+    POPUP:      'popup',       // 弹窗
+    SHOP:       'shop',        // 商店
+    RESULT:     'result',      // 结算界面
+  };
+
+  class SceneDetector {
+    constructor() {
+      this.currentScene = SCENES.UNKNOWN;
+      this.lastCheck = 0;
+      this.checkInterval = 2000; // 每 2s 检测一次
+    }
+
+    /**
+     * 检测当前场景
+     * 基于 TCGSDK 截图 + 像素特征判断
+     * 注意：需要 TCGSDK 支持截图 API，否则降级为延时判断
+     */
+    async detect(operator) {
+      const now = Date.now();
+      if (now - this.lastCheck < this.checkInterval) return this.currentScene;
+      this.lastCheck = now;
+
+      // 如果 SDK 不支持截图，返回 UNKNOWN
+      if (!operator.sdk) return SCENES.UNKNOWN;
+
+      try {
+        // 尝试通过 SDK 获取画面信息
+        // TCGSDK 部分版本支持 getVideoFrame / screenshot
+        const sdk = operator.sdk;
+
+        // 降级方案：根据操作结果推断场景
+        // 这里先返回 UNKNOWN，由具体任务自己判断
+        return SCENES.UNKNOWN;
+      } catch (e) {
+        return SCENES.UNKNOWN;
+      }
+    }
+
+    /**
+     * 等待进入指定场景
+     */
+    async waitForScene(targetScene, operator, timeout = 15000) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        const scene = await this.detect(operator);
+        if (scene === targetScene) return true;
+        await Utils.sleep(1000);
+      }
+      return false;
+    }
+
+    /**
+     * 判断是否在主界面（通过检测特定 UI 元素位置的像素颜色）
+     */
+    isHomeScreen() {
+      // 降级：总是返回 true，由任务流程保证
+      return true;
+    }
+  }
+
+  // ============================================================
+  //  PopupHandler — 弹窗处理
+  // ============================================================
+  class PopupHandler {
+    constructor(operator, config) {
+      this.op = operator;
+      this.config = config;
+      this.knownPopups = [
+        // 已知弹窗的关闭按钮坐标 (基于 1280x720)
+        { name: '活动弹窗', close: { x: 1200, y: 80 } },
+        { name: '公告弹窗', close: { x: 960, y: 100 } },
+        { name: '签到弹窗', close: { x: 640, y: 550 } },
+        { name: '奖励弹窗', close: { x: 640, y: 500 } },
+        { name: '通用关闭', close: { x: 1230, y: 40 } },
+        { name: '通用确认', close: { x: 640, y: 500 } },
+      ];
+    }
+
+    /**
+     * 尝试关闭所有可能的弹窗
+     */
+    async dismissAll() {
+      if (!this.config.get('autoDismissPopup')) return;
+
+      Utils.log('debug', '尝试关闭弹窗...');
+      for (const popup of this.knownPopups) {
+        await this.op.clickNatural(popup.close.x, popup.close.y, 8);
+        await Utils.randomDelay(
+          this.config.get('delay.popup.min'),
+          this.config.get('delay.popup.max')
+        );
+      }
+    }
+
+    /**
+     * 快速关闭（只点最关键的几个位置）
+     */
+    async dismissQuick() {
+      await this.op.clickNatural(1230, 40, 5);   // 右上角 X
+      await Utils.sleep(300);
+      await this.op.clickNatural(640, 500, 5);   // 中央确认
+      await Utils.sleep(300);
+    }
+  }
+
+  // ============================================================
+  //  CoordRecorder — 坐标录制器
+  // ============================================================
+  class CoordRecorder {
+    constructor() {
+      this.recording = false;
+      this.recorded = [];
+      this.overlay = null;
+    }
+
+    start() {
+      this.recording = true;
+      this.recorded = [];
+      this._createOverlay();
+      this._bindClick();
+      Utils.log('info', '🎯 坐标录制模式已开启 - 点击画面记录坐标');
+    }
+
+    stop() {
+      this.recording = false;
+      this._removeOverlay();
+      this._unbindClick();
+      Utils.log('info', `🎯 坐标录制结束，共记录 ${this.recorded.length} 个点`);
+      return this.recorded;
+    }
+
+    _createOverlay() {
+      this.overlay = document.createElement('div');
+      this.overlay.style.cssText = `
+        position:fixed;top:10px;left:50%;transform:translateX(-50%);
+        background:rgba(233,69,96,0.9);color:#fff;padding:8px 20px;
+        border-radius:20px;font-size:13px;z-index:999999;
+        font-family:'Microsoft YaHei',sans-serif;pointer-events:none;
+      `;
+      this.overlay.textContent = '🎯 录制中... 点击画面记录坐标 | Esc 退出';
+      document.body.appendChild(this.overlay);
+    }
+
+    _removeOverlay() {
+      this.overlay?.remove();
+      this.overlay = null;
+    }
+
+    _onCanvasClick = (e) => {
+      if (!this.recording) return;
+      // 获取相对于游戏画面的坐标
+      const canvas = document.querySelector('canvas');
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * BASE_W / rect.width);
+      const y = Math.round((e.clientY - rect.top) * BASE_H / rect.height);
+
+      const name = prompt(`记录坐标 (${x}, ${y})\n请输入名称 (如: main.adventure):`, `point_${this.recorded.length}`);
+      if (name) {
+        this.recorded.push({ name, x, y });
+        Utils.log('info', `  📍 ${name}: (${x}, ${y})`);
+      }
+    }
+
+    _onKeyDown = (e) => {
+      if (e.key === 'Escape' && this.recording) {
+        this.stop();
+      }
+    }
+
+    _bindClick() {
+      document.addEventListener('click', this._onCanvasClick, true);
+      document.addEventListener('keydown', this._onKeyDown);
+    }
+
+    _unbindClick() {
+      document.removeEventListener('click', this._onCanvasClick, true);
+      document.removeEventListener('keydown', this._onKeyDown);
+    }
+
+    /**
+     * 导出为 JS 代码
+     */
+    exportJS() {
+      if (this.recorded.length === 0) return '// 没有录制到坐标';
+      const groups = {};
+      this.recorded.forEach(m => {
+        const parts = m.name.split('.');
+        const g = parts.length > 1 ? parts[0] : 'misc';
+        const k = parts.length > 1 ? parts.slice(1).join('.') : parts[0];
+        if (!groups[g]) groups[g] = [];
+        groups[g].push({ key: k, x: m.x, y: m.y });
+      });
+      let code = '// === 录制的坐标 ===\n';
+      for (const [g, items] of Object.entries(groups)) {
+        code += `COORDS.${g} = {\n`;
+        items.forEach(i => { code += `  ${i.key}: { x: ${i.x}, y: ${i.y} },\n`; });
+        code += '};\n';
+      }
+      return code;
+    }
+  }
+
+  // ============================================================
+  //  GameOperator — TCGSDK 操作封装
   // ============================================================
   class GameOperator {
     constructor() {
       this.sdk = null;
-      this.resolution = { width: 1280, height: 720 };
       this.ready = false;
     }
 
     /**
-     * 初始化：获取 TCGSDK 实例
+     * 初始化 TCGSDK（多路径检测）
      */
     async init() {
       Utils.log('info', '正在初始化 TCGSDK...');
 
-      // 等待 TCGSDK 加载
+      // 尝试多种方式获取 SDK
+      const attempts = [
+        () => window.TCGSDK,
+        () => window.top?.TCGSDK,
+        () => window.frames[0]?.TCGSDK,
+        () => document.querySelector('iframe')?.contentWindow?.TCGSDK,
+      ];
+
+      // 等待 SDK 加载（最多 30s）
       try {
-        await Utils.waitForCondition(() => {
-          return window.TCGSDK || (window.top && window.top.TCGSDK);
+        const sdk = await Utils.waitFor(() => {
+          for (const get of attempts) {
+            try {
+              const s = get();
+              if (s && typeof s.sendMouseEvent === 'function') return s;
+            } catch (e) { /* cross-origin */ }
+          }
+          return null;
         }, 30000, 1000);
+
+        this.sdk = sdk;
+        this.ready = true;
+        Utils.log('info', '✓ TCGSDK 初始化成功');
+        return true;
       } catch (e) {
-        Utils.log('error', 'TCGSDK 未找到，请确认已进入云游戏页面');
+        Utils.log('error', '✗ TCGSDK 未找到，30s 超时');
+        Utils.log('info', '提示：请确认已进入云游戏页面（游戏画面可见）');
         return false;
       }
-
-      this.sdk = window.TCGSDK || window.top.TCGSDK;
-      this.ready = true;
-      Utils.log('info', 'TCGSDK 初始化成功');
-      return true;
     }
 
-    /**
-     * 检查 SDK 是否就绪
-     */
     assertReady() {
-      if (!this.ready || !this.sdk) {
-        throw new Error('TCGSDK 未初始化，请先调用 init()');
-      }
+      if (!this.ready || !this.sdk) throw new Error('TCGSDK 未初始化');
     }
 
     /**
-     * 点击指定坐标
-     * @param {number} x - X 坐标 (基于 1280x720)
-     * @param {number} y - Y 坐标
-     * @param {string} button - 'left' | 'right'
+     * 获取 canvas 当前尺寸
+     */
+    _getCanvasSize() {
+      const canvas = document.querySelector('canvas');
+      return {
+        w: canvas?.width || window.innerWidth,
+        h: canvas?.height || window.innerHeight,
+      };
+    }
+
+    /**
+     * 坐标缩放
+     */
+    _scale(x, y) {
+      const { w, h } = this._getCanvasSize();
+      return {
+        x: Math.round(x * w / BASE_W),
+        y: Math.round(y * h / BASE_H),
+      };
+    }
+
+    /**
+     * 点击
      */
     async click(x, y, button = 'left') {
       this.assertReady();
-      const scaled = this.scaleCoord(x, y);
+      const s = this._scale(x, y);
+      const btn = button === 'right' ? 2 : 0;
 
-      // mousedown
-      this.sdk.sendMouseEvent({
-        type: 'mousedown',
-        x: scaled.x,
-        y: scaled.y,
-        button: button === 'right' ? 2 : 0,
-      });
+      this.sdk.sendMouseEvent({ type: 'mousedown', x: s.x, y: s.y, button: btn });
+      await Utils.sleep(Utils.random(30, 80));
+      this.sdk.sendMouseEvent({ type: 'mouseup', x: s.x, y: s.y, button: btn });
 
-      await Utils.sleep(50 + Math.random() * 50);
-
-      // mouseup
-      this.sdk.sendMouseEvent({
-        type: 'mouseup',
-        x: scaled.x,
-        y: scaled.y,
-        button: button === 'right' ? 2 : 0,
-      });
-
-      Utils.log('debug', `点击 (${x},${y}) → 缩放 (${scaled.x},${scaled.y})`);
+      Utils.log('debug', `click(${x},${y}) → (${s.x},${s.y})`);
     }
 
     /**
-     * 连续点击（用于确认等场景）
+     * 自然点击（带随机偏移）
+     */
+    async clickNatural(x, y, radius = 5) {
+      const ox = x + Utils.random(-radius, radius);
+      const oy = y + Utils.random(-radius, radius);
+      await this.click(Math.round(ox), Math.round(oy));
+    }
+
+    /**
+     * 连续点击
      */
     async clickMultiple(x, y, count = 2, interval = 300) {
       for (let i = 0; i < count; i++) {
-        await this.click(x, y);
+        await this.clickNatural(x, y);
         if (i < count - 1) await Utils.sleep(interval);
       }
     }
 
     /**
-     * 滑动操作
-     * @param {number} x1 - 起点 X
-     * @param {number} y1 - 起点 Y
-     * @param {number} x2 - 终点 X
-     * @param {number} y2 - 终点 Y
-     * @param {number} duration - 滑动时长 (ms)
+     * 滑动
      */
     async swipe(x1, y1, x2, y2, duration = 500) {
       this.assertReady();
-      const start = this.scaleCoord(x1, y1);
-      const end = this.scaleCoord(x2, y2);
-
+      const s1 = this._scale(x1, y1);
+      const s2 = this._scale(x2, y2);
       const steps = Math.max(5, Math.floor(duration / 30));
-      const dx = (end.x - start.x) / steps;
-      const dy = (end.y - start.y) / steps;
+      const dx = (s2.x - s1.x) / steps;
+      const dy = (s2.y - s1.y) / steps;
 
-      // touchstart
       this.sdk.sendRawEvent({
         type: 'touchstart',
-        touches: [{ identifier: 0, x: start.x, y: start.y }],
+        touches: [{ identifier: 0, x: s1.x, y: s1.y }],
       });
 
       for (let i = 1; i <= steps; i++) {
         await Utils.sleep(duration / steps);
         this.sdk.sendRawEvent({
           type: 'touchmove',
-          touches: [{
-            identifier: 0,
-            x: Math.round(start.x + dx * i),
-            y: Math.round(start.y + dy * i),
-          }],
+          touches: [{ identifier: 0, x: Math.round(s1.x + dx * i), y: Math.round(s1.y + dy * i) }],
         });
       }
 
-      // touchend
       this.sdk.sendRawEvent({
         type: 'touchend',
-        changedTouches: [{ identifier: 0, x: end.x, y: end.y }],
+        changedTouches: [{ identifier: 0, x: s2.x, y: s2.y }],
       });
 
-      Utils.log('debug', `滑动 (${x1},${y1}) → (${x2},${y2})`);
+      Utils.log('debug', `swipe(${x1},${y1})→(${x2},${y2})`);
     }
 
     /**
-     * 键盘按键
+     * 按键
      */
     async keyPress(key) {
       this.assertReady();
       this.sdk.sendKeyboardEvent({ type: 'keydown', key });
       await Utils.sleep(50);
       this.sdk.sendKeyboardEvent({ type: 'keyup', key });
-      Utils.log('debug', `按键: ${key}`);
-    }
-
-    /**
-     * 坐标缩放（适配不同分辨率）
-     */
-    scaleCoord(x, y) {
-      // 当前页面尺寸
-      const canvas = document.querySelector('canvas');
-      const currentW = canvas ? canvas.width : window.innerWidth;
-      const currentH = canvas ? canvas.height : window.innerHeight;
-
-      return {
-        x: Math.round(x * currentW / this.resolution.width),
-        y: Math.round(y * currentH / this.resolution.height),
-      };
-    }
-
-    /**
-     * 带随机偏移的点击（更自然）
-     */
-    async clickNatural(x, y, radius = 5) {
-      const offsetX = x + (Math.random() * radius * 2 - radius);
-      const offsetY = y + (Math.random() * radius * 2 - radius);
-      await this.click(Math.round(offsetX), Math.round(offsetY));
     }
 
     /**
@@ -337,479 +595,394 @@
      */
     async longPress(x, y, duration = 1000) {
       this.assertReady();
-      const scaled = this.scaleCoord(x, y);
-
-      this.sdk.sendMouseEvent({
-        type: 'mousedown',
-        x: scaled.x,
-        y: scaled.y,
-        button: 0,
-      });
-
+      const s = this._scale(x, y);
+      this.sdk.sendMouseEvent({ type: 'mousedown', x: s.x, y: s.y, button: 0 });
       await Utils.sleep(duration);
-
-      this.sdk.sendMouseEvent({
-        type: 'mouseup',
-        x: scaled.x,
-        y: scaled.y,
-        button: 0,
-      });
+      this.sdk.sendMouseEvent({ type: 'mouseup', x: s.x, y: s.y, button: 0 });
     }
   }
 
   // ============================================================
-  //  scheduler.js — 任务调度器
+  //  TaskScheduler — 任务调度器
   // ============================================================
   class TaskScheduler {
-    constructor(operator, config) {
-      this.operator = operator;
+    constructor(operator, config, popupHandler) {
+      this.op = operator;
       this.config = config;
-      this.taskQueue = [];
+      this.popupHandler = popupHandler;
+      this.queue = [];
       this.running = false;
       this.paused = false;
-      this.currentTask = null;
+      this.current = null;
       this.history = [];
       this.listeners = {};
     }
 
-    /**
-     * 事件监听
-     */
-    on(event, callback) {
-      if (!this.listeners[event]) this.listeners[event] = [];
-      this.listeners[event].push(callback);
+    on(event, fn) {
+      (this.listeners[event] ??= []).push(fn);
     }
 
     emit(event, data) {
-      (this.listeners[event] || []).forEach(cb => {
-        try { cb(data); } catch (e) { Utils.log('error', 'Event callback error:', e); }
+      (this.listeners[event] || []).forEach(fn => {
+        try { fn(data); } catch (e) { Utils.log('error', 'event cb error:', e); }
       });
     }
 
-    /**
-     * 添加任务
-     */
     addTask(task) {
-      this.taskQueue.push(task);
+      this.queue.push(task);
       this.emit('taskAdded', task);
-      Utils.log('info', `任务已加入队列: ${task.name}`);
     }
 
-    /**
-     * 批量添加任务
-     */
     addTasks(tasks) {
       tasks.forEach(t => this.addTask(t));
     }
 
-    /**
-     * 开始执行
-     */
     async start() {
-      if (this.running) {
-        Utils.log('warn', '调度器已在运行');
-        return;
-      }
-
+      if (this.running) return;
       this.running = true;
       this.paused = false;
-      this.emit('start', { total: this.taskQueue.length });
-      Utils.log('info', `开始执行，共 ${this.taskQueue.length} 个任务`);
+      this.emit('start', { total: this.queue.length });
+      Utils.log('info', `▶ 开始执行，共 ${this.queue.length} 个任务`);
 
-      while (this.taskQueue.length > 0 && this.running) {
-        if (this.paused) {
-          await Utils.sleep(1000);
-          continue;
-        }
+      while (this.queue.length > 0 && this.running) {
+        if (this.paused) { await Utils.sleep(1000); continue; }
 
-        const task = this.taskQueue.shift();
-        this.currentTask = task;
+        const task = this.queue.shift();
+        this.current = task;
         this.emit('taskStart', task);
 
         try {
           task.status = 'running';
-          Utils.log('info', `▶ 开始任务: ${task.name}`);
+          task.startTime = Date.now();
+          Utils.log('info', `▶ [${task.name}] 开始`);
 
-          await this.executeWithRetry(task);
+          await this._execWithRetry(task);
 
           task.status = 'done';
           task.endTime = Date.now();
           this.history.push({ ...task, result: 'success' });
           this.emit('taskDone', task);
-          Utils.log('info', `✓ 任务完成: ${task.name}`);
+          Utils.log('info', `✓ [${task.name}] 完成 (${Utils.formatDuration(task.endTime - task.startTime)})`);
 
-        } catch (error) {
+        } catch (err) {
           task.status = 'failed';
-          task.error = error.message;
+          task.error = err.message;
           task.endTime = Date.now();
           this.history.push({ ...task, result: 'failed' });
-          this.emit('taskFailed', { task, error });
-          Utils.log('error', `✗ 任务失败: ${task.name}`, error.message);
+          this.emit('taskFailed', { task, error: err });
+          Utils.log('error', `✗ [${task.name}] 失败: ${err.message}`);
         }
 
-        this.currentTask = null;
+        this.current = null;
 
-        // 任务间间隔
-        if (this.taskQueue.length > 0) {
-          await this.operator.constructor.prototype.constructor === Object ? Utils.sleep(1000) :
-            Utils.randomDelay(this.config.get('delay.short.min'), this.config.get('delay.short.max'));
+        // 任务间延时 + 自动关闭弹窗
+        if (this.queue.length > 0) {
+          await this.popupHandler.dismissQuick();
+          await Utils.randomDelay(
+            this.config.get('delay.short.min'),
+            this.config.get('delay.short.max')
+          );
         }
       }
 
       this.running = false;
-      this.emit('complete', {
-        total: this.history.length,
-        success: this.history.filter(h => h.result === 'success').length,
-        failed: this.history.filter(h => h.result === 'failed').length,
-      });
-      Utils.log('info', '所有任务执行完毕');
+      const success = this.history.filter(h => h.result === 'success').length;
+      const failed = this.history.filter(h => h.result === 'failed').length;
+      this.emit('complete', { total: this.history.length, success, failed });
+      Utils.log('info', `🏁 全部完成！成功 ${success}，失败 ${failed}`);
     }
 
-    /**
-     * 带重试的执行
-     */
-    async executeWithRetry(task) {
-      const maxRetry = this.config.get('retry.maxAttempts') || 3;
-      const retryInterval = this.config.get('retry.interval') || 2000;
+    async _execWithRetry(task) {
+      const max = this.config.get('retry.maxAttempts') || 3;
+      const interval = this.config.get('retry.interval') || 2000;
 
-      for (let attempt = 1; attempt <= maxRetry; attempt++) {
+      for (let i = 1; i <= max; i++) {
         try {
-          await task.execute(this.operator, this.config);
+          await task.execute(this.op, this.config, this.popupHandler);
           return;
-        } catch (error) {
-          if (attempt < maxRetry) {
-            Utils.log('warn', `任务 ${task.name} 第 ${attempt} 次失败，${retryInterval}ms 后重试...`);
-            await Utils.sleep(retryInterval);
+        } catch (err) {
+          if (i < max) {
+            Utils.log('warn', `  [${task.name}] 第${i}次失败，${interval}ms 后重试...`);
+            await Utils.sleep(interval);
+            // 重试前先关闭弹窗回到主界面
+            await this.popupHandler.dismissAll();
           } else {
-            throw error;
+            throw err;
           }
         }
       }
     }
 
-    /**
-     * 暂停
-     */
-    pause() {
-      this.paused = true;
-      this.emit('pause', {});
-      Utils.log('info', '调度器已暂停');
-    }
+    pause()  { this.paused = true;  this.emit('pause', {}); }
+    resume() { this.paused = false; this.emit('resume', {}); }
+    stop()   { this.running = false; this.paused = false; this.queue = []; this.emit('stop', {}); }
 
-    /**
-     * 恢复
-     */
-    resume() {
-      this.paused = false;
-      this.emit('resume', {});
-      Utils.log('info', '调度器已恢复');
-    }
-
-    /**
-     * 停止
-     */
-    stop() {
-      this.running = false;
-      this.paused = false;
-      this.taskQueue = [];
-      this.emit('stop', {});
-      Utils.log('info', '调度器已停止');
-    }
-
-    /**
-     * 获取状态
-     */
     getStatus() {
       return {
         running: this.running,
         paused: this.paused,
-        currentTask: this.currentTask ? this.currentTask.name : null,
-        queueLength: this.taskQueue.length,
-        historyCount: this.history.length,
+        current: this.current?.name || null,
+        queueLen: this.queue.length,
+        done: this.history.filter(h => h.result === 'success').length,
+        failed: this.history.filter(h => h.result === 'failed').length,
       };
     }
   }
 
   // ============================================================
-  //  coords.js — 坐标定义 (基于 1280x720)
+  //  COORDS — 坐标定义 (基于 1280x720)
   // ============================================================
   const COORDS = {
-    // === 主界面 ===
     main: {
-      adventure:    { x: 150, y: 650 },   // 冒险
-      shop:         { x: 400, y: 650 },   // 商店
-      team:         { x: 650, y: 650 },   // 小队
-      event:        { x: 900, y: 650 },   // 活动
-      home:         { x: 1100, y: 650 },  // 主页
+      adventure:  { x: 150, y: 650 },
+      shop:       { x: 400, y: 650 },
+      team:       { x: 650, y: 650 },
+      event:      { x: 900, y: 650 },
+      home:       { x: 1100, y: 650 },
     },
-
-    // === 通用按钮 ===
     common: {
-      back:         { x: 50,  y: 40 },    // 返回按钮 (左上)
-      close:        { x: 1230, y: 40 },   // 关闭按钮 (右上)
-      confirm:      { x: 640, y: 500 },   // 确认按钮 (中央偏下)
-      confirmOk:    { x: 540, y: 450 },   // 弹窗确认 (偏左)
-      cancel:       { x: 740, y: 450 },   // 弹窗取消 (偏右)
-      challenge:    { x: 1100, y: 600 },  // 挑战按钮
-      sweep:        { x: 1000, y: 600 },  // 扫荡按钮
-      startBattle:  { x: 1100, y: 650 },  // 开始战斗
-      skipBtn:      { x: 1200, y: 50 },   // 跳过按钮
-      rewardClaim:  { x: 640, y: 550 },   // 领取奖励
-      tapAnywhere:  { x: 640, y: 400 },   // 点击任意位置继续
+      back:       { x: 50,  y: 40 },
+      close:      { x: 1230, y: 40 },
+      confirm:    { x: 640, y: 500 },
+      confirmOk:  { x: 540, y: 450 },
+      cancel:     { x: 740, y: 450 },
+      challenge:  { x: 1100, y: 600 },
+      sweep:      { x: 1000, y: 600 },
+      startBattle:{ x: 1100, y: 650 },
+      skip:       { x: 1200, y: 50 },
+      reward:     { x: 640, y: 550 },
+      tapAny:     { x: 640, y: 400 },
     },
-
-    // === 收获相关 ===
     collect: {
-      // 招财
-      goldCoin:     { x: 150, y: 300 },
-      goldClaim:    { x: 640, y: 450 },
-      // 邮件
-      mailIcon:     { x: 1200, y: 100 },
-      mailCollectAll: { x: 1100, y: 650 },
-      // 签到
-      signBtn:      { x: 640, y: 400 },
-      // 每日分享
-      shareBtn:     { x: 640, y: 350 },
-      shareConfirm: { x: 640, y: 500 },
-      // 赠送体力
-      staminaSend:  { x: 640, y: 400 },
-      // 情报社
-      intelBtn:     { x: 300, y: 300 },
-      // 排行榜
-      rankLike:     { x: 1000, y: 300 },
-      // 活跃度宝箱
-      activeBox1:   { x: 300, y: 550 },
-      activeBox2:   { x: 500, y: 550 },
-      activeBox3:   { x: 700, y: 550 },
-      activeBox4:   { x: 900, y: 550 },
-      // 忍法帖
+      goldCoin:      { x: 150, y: 300 },
+      goldClaim:     { x: 640, y: 450 },
+      mailIcon:      { x: 1200, y: 100 },
+      mailAll:       { x: 1100, y: 650 },
+      signBtn:       { x: 640, y: 400 },
+      shareBtn:      { x: 640, y: 350 },
+      shareConfirm:  { x: 640, y: 500 },
+      staminaSend:   { x: 640, y: 400 },
+      intelBtn:      { x: 300, y: 300 },
+      rankLike:      { x: 1000, y: 300 },
+      activeBox1:    { x: 300, y: 550 },
+      activeBox2:    { x: 500, y: 550 },
+      activeBox3:    { x: 700, y: 550 },
+      activeBox4:    { x: 900, y: 550 },
       ninjutsuClaim: { x: 640, y: 500 },
-      // 招募
-      recruitFree:  { x: 640, y: 450 },
-      recruitConfirm: { x: 640, y: 500 },
+      recruitFree:   { x: 640, y: 450 },
+      recruitConfirm:{ x: 640, y: 500 },
     },
-
-    // === 日常任务 ===
     daily: {
-      // 丰饶之间
-      abundanceEntry:  { x: 300, y: 300 },
-      abundanceChallenge: { x: 1100, y: 600 },
-      // 小队突袭
-      squadEntry:      { x: 500, y: 300 },
-      squadChallenge:  { x: 1100, y: 600 },
-      // 生存试炼
-      survivalEntry:   { x: 700, y: 300 },
-      // 装备扫荡
-      equipEntry:      { x: 300, y: 450 },
-      // 任务集会所
-      missionEntry:    { x: 500, y: 450 },
-      missionDispatch: { x: 640, y: 500 },
-      // 秘境挑战
-      secretEntry:     { x: 700, y: 450 },
-      // 组织祈福
-      orgBlessEntry:   { x: 900, y: 300 },
-      orgBlessBtn:     { x: 640, y: 500 },
-      // 商店
-      shopItem1:       { x: 300, y: 350 },
-      shopBuyBtn:      { x: 1000, y: 500 },
-      shopConfirm:     { x: 540, y: 450 },
+      abundanceEntry:    { x: 300, y: 300 },
+      abundanceChallenge:{ x: 1100, y: 600 },
+      squadEntry:        { x: 500, y: 300 },
+      squadChallenge:    { x: 1100, y: 600 },
+      survivalEntry:     { x: 700, y: 300 },
+      equipEntry:        { x: 300, y: 450 },
+      missionEntry:      { x: 500, y: 450 },
+      missionDispatch:   { x: 640, y: 500 },
+      secretEntry:       { x: 700, y: 450 },
+      orgBlessEntry:     { x: 900, y: 300 },
+      orgBlessBtn:       { x: 640, y: 500 },
+      shopItem1:         { x: 300, y: 350 },
+      shopBuyBtn:        { x: 1000, y: 500 },
+      shopConfirm:       { x: 540, y: 450 },
     },
-
-    // === 周常 ===
     weekly: {
-      // 修行之路
-      practiceEntry:   { x: 200, y: 200 },
-      practiceStart:   { x: 1100, y: 600 },
-      // 追击晓组织
-      akatsukiEntry:   { x: 400, y: 200 },
-      // 叛忍来袭
-      rebelEntry:      { x: 600, y: 200 },
-      // 组织要塞
-      fortressEntry:   { x: 800, y: 200 },
-      // 天地战场
-      heavenEntry:     { x: 1000, y: 200 },
+      practiceEntry: { x: 200, y: 200 },
+      practiceStart: { x: 1100, y: 600 },
+      akatsukiEntry: { x: 400, y: 200 },
+      rebelEntry:    { x: 600, y: 200 },
+      fortressEntry: { x: 800, y: 200 },
+      heavenEntry:   { x: 1000, y: 200 },
     },
-
-    // === 战斗相关 ===
     battle: {
-      autoFight:       { x: 1200, y: 360 },  // 自动战斗开关
-      speedUp:         { x: 1200, y: 300 },   // 加速
-      ultSkill:        { x: 1100, y: 500 },   // 大招
-      battleEnd:       { x: 640, y: 550 },    // 战斗结束确认
+      autoFight: { x: 1200, y: 360 },
+      speedUp:   { x: 1200, y: 300 },
+      ultSkill:  { x: 1100, y: 500 },
+      battleEnd: { x: 640, y: 550 },
     },
   };
 
   // ============================================================
-  //  tasks.js — 任务定义
+  //  Tasks — 任务定义
   // ============================================================
-
-  /**
-   * 基础任务类
-   */
   class BaseTask {
     constructor(name, category) {
       this.name = name;
-      this.category = category; // 'daily' | 'collect' | 'weekly'
-      this.status = 'pending';  // pending | running | done | failed
+      this.category = category;
+      this.status = 'pending';
       this.startTime = null;
       this.endTime = null;
       this.error = null;
     }
 
-    async goBack(operator) {
-      await operator.clickNatural(COORDS.common.back.x, COORDS.common.back.y);
-      await Utils.randomDelay(1000, 2000);
+    async back(op) {
+      await op.clickNatural(COORDS.common.back.x, COORDS.common.back.y);
+      await Utils.randomDelay(800, 1500);
     }
 
-    async goHome(operator) {
-      // 多次返回确保回到主界面
-      for (let i = 0; i < 3; i++) {
-        await operator.clickNatural(COORDS.common.back.x, COORDS.common.back.y);
-        await Utils.randomDelay(500, 1000);
+    async backToHome(op, times = 3) {
+      for (let i = 0; i < times; i++) {
+        await op.clickNatural(COORDS.common.back.x, COORDS.common.back.y);
+        await Utils.randomDelay(400, 800);
       }
     }
 
-    async tapConfirm(operator) {
-      await operator.clickNatural(COORDS.common.confirm.x, COORDS.common.confirm.y);
-      await Utils.randomDelay(500, 1000);
+    async confirm(op) {
+      await op.clickNatural(COORDS.common.confirm.x, COORDS.common.confirm.y);
+      await Utils.randomDelay(400, 800);
     }
 
-    async tapAnywhere(operator) {
-      await operator.clickNatural(COORDS.common.tapAnywhere.x, COORDS.common.tapAnywhere.y);
-      await Utils.randomDelay(500, 1000);
+    async tapAny(op) {
+      await op.clickNatural(COORDS.common.tapAny.x, COORDS.common.tapAny.y);
+      await Utils.randomDelay(400, 800);
     }
 
-    async waitForBattle(operator, maxWait = 120000) {
-      Utils.log('info', '  等待战斗结束...');
-      // 简单等待策略：等固定时间后尝试点击
-      await Utils.sleep(maxWait);
-      // 尝试点击战斗结束区域
-      await operator.clickNatural(COORDS.battle.battleEnd.x, COORDS.battle.battleEnd.y);
+    async closePopup(op) {
+      await op.clickNatural(COORDS.common.close.x, COORDS.common.close.y);
+      await Utils.randomDelay(300, 600);
+    }
+
+    async navigateTo(op, coord, cfg) {
+      await op.clickNatural(coord.x, coord.y);
+      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
+    }
+
+    async waitForBattle(op, cfg, maxMs) {
+      const wait = maxMs || cfg.get('delay.battle.max') || 120000;
+      Utils.log('info', `    ⏳ 等待战斗 (${Math.round(wait/1000)}s)...`);
+      await Utils.sleep(wait);
+      // 战斗结束后点击
+      await op.clickNatural(COORDS.battle.battleEnd.x, COORDS.battle.battleEnd.y);
       await Utils.randomDelay(1000, 2000);
-      await this.tapConfirm(operator);
+      await this.confirm(op);
+      await this.tapAny(op);
+    }
+
+    async goAdventure(op, cfg) {
+      await this.navigateTo(op, COORDS.main.adventure, cfg);
     }
   }
 
-  // --- 收获类任务 ---
+  // --- 收获类 ---
 
   class CollectGoldTask extends BaseTask {
     constructor() { super('招财', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [招财] 执行中...');
-      // TODO: 进入招财界面的导航路径需根据实际 UI 调整
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.goldCoin.x, COORDS.collect.goldCoin.y);
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
       await op.clickNatural(COORDS.collect.goldClaim.x, COORDS.collect.goldClaim.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
-      await this.goBack(op);
+      await this.confirm(op);
+      await this.back(op);
     }
   }
 
   class CollectMailTask extends BaseTask {
     constructor() { super('邮件领取', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [邮件] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.mailIcon.x, COORDS.collect.mailIcon.y);
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.collect.mailCollectAll.x, COORDS.collect.mailCollectAll.y);
+      await op.clickNatural(COORDS.collect.mailAll.x, COORDS.collect.mailAll.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
-      await this.goBack(op);
+      await this.confirm(op);
+      await this.back(op);
     }
   }
 
   class CollectSignTask extends BaseTask {
     constructor() { super('每日签到', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [签到] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.signBtn.x, COORDS.collect.signBtn.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
+      await this.confirm(op);
     }
   }
 
   class ShareDailyTask extends BaseTask {
     constructor() { super('每日分享', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [分享] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.shareBtn.x, COORDS.collect.shareBtn.y);
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
       await op.clickNatural(COORDS.collect.shareConfirm.x, COORDS.collect.shareConfirm.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.goBack(op);
+      await this.back(op);
     }
   }
 
   class SendStaminaTask extends BaseTask {
     constructor() { super('赠送体力', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [赠送体力] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.staminaSend.x, COORDS.collect.staminaSend.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
+      await this.confirm(op);
     }
   }
 
   class CollectIntelTask extends BaseTask {
     constructor() { super('情报社', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [情报社] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.intelBtn.x, COORDS.collect.intelBtn.y);
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      // 情报社可能需要多次点击领取
       for (let i = 0; i < 3; i++) {
         await op.clickNatural(COORDS.collect.intelBtn.x, COORDS.collect.intelBtn.y + i * 80);
         await Utils.randomDelay(cfg.get('delay.click.min'), cfg.get('delay.click.max'));
       }
-      await this.goBack(op);
+      await this.back(op);
     }
   }
 
   class CollectRankTask extends BaseTask {
     constructor() { super('排行榜点赞', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [排行榜] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.rankLike.x, COORDS.collect.rankLike.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.goBack(op);
+      await this.back(op);
     }
   }
 
   class CollectActiveTask extends BaseTask {
     constructor() { super('活跃度宝箱', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [活跃度] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       const boxes = [COORDS.collect.activeBox1, COORDS.collect.activeBox2,
                      COORDS.collect.activeBox3, COORDS.collect.activeBox4];
-      for (const box of boxes) {
-        await op.clickNatural(box.x, box.y);
+      for (const b of boxes) {
+        await op.clickNatural(b.x, b.y);
         await Utils.randomDelay(cfg.get('delay.click.min'), cfg.get('delay.click.max'));
-        await this.tapConfirm(op);
+        await this.confirm(op);
       }
     }
   }
 
   class CollectNinjutsuTask extends BaseTask {
     constructor() { super('忍法帖', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [忍法帖] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.ninjutsuClaim.x, COORDS.collect.ninjutsuClaim.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
+      await this.confirm(op);
     }
   }
 
   class RecruitTask extends BaseTask {
     constructor() { super('免费招募', 'collect'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [招募] 执行中...');
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
       await op.clickNatural(COORDS.collect.recruitFree.x, COORDS.collect.recruitFree.y);
       await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
       await op.clickNatural(COORDS.collect.recruitConfirm.x, COORDS.collect.recruitConfirm.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapAnywhere(op);
-      await this.goBack(op);
+      await this.tapAny(op);
+      await this.back(op);
     }
   }
 
@@ -817,803 +990,525 @@
 
   class OrgBlessingTask extends BaseTask {
     constructor() { super('组织祈福', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [组织祈福] 执行中...');
-      // 进入组织 → 祈福
-      await op.clickNatural(COORDS.daily.orgBlessEntry.x, COORDS.daily.orgBlessEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.daily.orgBlessEntry, cfg);
       await op.clickNatural(COORDS.daily.orgBlessBtn.x, COORDS.daily.orgBlessBtn.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
-      await this.goBack(op);
+      await this.confirm(op);
+      await this.back(op);
     }
   }
 
   class AbundanceRoomTask extends BaseTask {
     constructor() { super('丰饶之间', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [丰饶之间] 执行中...');
-      // 进入冒险 → 丰饶之间
-      await op.clickNatural(COORDS.main.adventure.x, COORDS.main.adventure.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.abundanceEntry.x, COORDS.daily.abundanceEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      // 挑战
-      await op.clickNatural(COORDS.daily.abundanceChallenge.x, COORDS.daily.abundanceChallenge.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      // 等待战斗
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.goAdventure(op, cfg);
+      await this.navigateTo(op, COORDS.daily.abundanceEntry, cfg);
+      await this.navigateTo(op, COORDS.daily.abundanceChallenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class SquadRaidTask extends BaseTask {
     constructor() { super('小队突袭', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [小队突袭] 执行中...');
-      await op.clickNatural(COORDS.main.adventure.x, COORDS.main.adventure.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.squadEntry.x, COORDS.daily.squadEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.squadChallenge.x, COORDS.daily.squadChallenge.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.goAdventure(op, cfg);
+      await this.navigateTo(op, COORDS.daily.squadEntry, cfg);
+      await this.navigateTo(op, COORDS.daily.squadChallenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class SurvivalTrialTask extends BaseTask {
     constructor() { super('生存试炼', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [生存试炼] 执行中...');
-      await op.clickNatural(COORDS.main.adventure.x, COORDS.main.adventure.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.survivalEntry.x, COORDS.daily.survivalEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.goAdventure(op, cfg);
+      await this.navigateTo(op, COORDS.daily.survivalEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class EquipSweepTask extends BaseTask {
     constructor() { super('装备扫荡', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [装备扫荡] 执行中...');
-      await op.clickNatural(COORDS.main.adventure.x, COORDS.main.adventure.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.equipEntry.x, COORDS.daily.equipEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.goAdventure(op, cfg);
+      await this.navigateTo(op, COORDS.daily.equipEntry, cfg);
       await op.clickNatural(COORDS.common.sweep.x, COORDS.common.sweep.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-      await this.tapConfirm(op);
-      await this.goBack(op);
+      await this.confirm(op);
+      await this.back(op);
     }
   }
 
   class MissionHallTask extends BaseTask {
     constructor() { super('任务集会所', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [任务集会所] 执行中...');
-      await op.clickNatural(COORDS.daily.missionEntry.x, COORDS.daily.missionEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      // 派遣任务
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.daily.missionEntry, cfg);
       for (let i = 0; i < 3; i++) {
         await op.clickNatural(COORDS.daily.missionDispatch.x, COORDS.daily.missionDispatch.y + i * 60);
         await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
-        await this.tapConfirm(op);
+        await this.confirm(op);
       }
-      await this.goBack(op);
+      await this.back(op);
     }
   }
 
   class SecretRealmTask extends BaseTask {
     constructor() { super('秘境挑战', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [秘境挑战] 执行中...');
-      await op.clickNatural(COORDS.main.adventure.x, COORDS.main.adventure.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.daily.secretEntry.x, COORDS.daily.secretEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.goAdventure(op, cfg);
+      await this.navigateTo(op, COORDS.daily.secretEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class ShopBuyTask extends BaseTask {
     constructor() { super('商店购买', 'daily'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [商店购买] 执行中...');
-      await op.clickNatural(COORDS.main.shop.x, COORDS.main.shop.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      // 购买第一个推荐物品
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.main.shop, cfg);
       await op.clickNatural(COORDS.daily.shopItem1.x, COORDS.daily.shopItem1.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
       await op.clickNatural(COORDS.daily.shopBuyBtn.x, COORDS.daily.shopBuyBtn.y);
       await Utils.randomDelay(cfg.get('delay.short.min'), cfg.get('delay.short.max'));
       await op.clickNatural(COORDS.daily.shopConfirm.x, COORDS.daily.shopConfirm.y);
-      await this.goBack(op);
+      await this.back(op);
     }
   }
 
-  // --- 周常任务 ---
+  // --- 周常 ---
 
   class RoadOfPracticeTask extends BaseTask {
     constructor() { super('修行之路', 'weekly'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [修行之路] 执行中...');
-      await op.clickNatural(COORDS.weekly.practiceEntry.x, COORDS.weekly.practiceEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.weekly.practiceStart.x, COORDS.weekly.practiceStart.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.weekly.practiceEntry, cfg);
+      await this.navigateTo(op, COORDS.weekly.practiceStart, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class ChaseAkatsukiTask extends BaseTask {
     constructor() { super('追击晓组织', 'weekly'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [追击晓组织] 执行中...');
-      await op.clickNatural(COORDS.weekly.akatsukiEntry.x, COORDS.weekly.akatsukiEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.weekly.akatsukiEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class RebelNinjaTask extends BaseTask {
     constructor() { super('叛忍来袭', 'weekly'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [叛忍来袭] 执行中...');
-      await op.clickNatural(COORDS.weekly.rebelEntry.x, COORDS.weekly.rebelEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.weekly.rebelEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class OrgFortressTask extends BaseTask {
     constructor() { super('组织要塞', 'weekly'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [组织要塞] 执行中...');
-      await op.clickNatural(COORDS.weekly.fortressEntry.x, COORDS.weekly.fortressEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.weekly.fortressEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   class HeavenEarthTask extends BaseTask {
     constructor() { super('天地战场', 'weekly'); }
-    async execute(op, cfg) {
-      Utils.log('info', '  [天地战场] 执行中...');
-      await op.clickNatural(COORDS.weekly.heavenEntry.x, COORDS.weekly.heavenEntry.y);
-      await Utils.randomDelay(cfg.get('delay.pageLoad.min'), cfg.get('delay.pageLoad.max'));
-      await op.clickNatural(COORDS.common.challenge.x, COORDS.common.challenge.y);
-      await this.waitForBattle(op, cfg.get('delay.battle.max') || 90000);
-      await this.goBack(op);
+    async execute(op, cfg, popup) {
+      await popup.dismissQuick();
+      await this.navigateTo(op, COORDS.weekly.heavenEntry, cfg);
+      await this.navigateTo(op, COORDS.common.challenge, cfg);
+      await this.waitForBattle(op, cfg);
+      await this.back(op);
     }
   }
 
   // 任务工厂
   const TaskFactory = {
-    createAll(config) {
-      const tasks = [];
-      const sw = config.get('taskSwitches');
-
-      // 收获类
-      if (sw.collectGold) tasks.push(new CollectGoldTask());
-      if (sw.collectMail) tasks.push(new CollectMailTask());
-      if (sw.collectSign) tasks.push(new CollectSignTask());
-      if (sw.shareDaily) tasks.push(new ShareDailyTask());
-      if (sw.sendStamina) tasks.push(new SendStaminaTask());
-      if (sw.collectIntel) tasks.push(new CollectIntelTask());
-      if (sw.collectRank) tasks.push(new CollectRankTask());
-      if (sw.collectActive) tasks.push(new CollectActiveTask());
-      if (sw.collectNinjutsu) tasks.push(new CollectNinjutsuTask());
-      if (sw.recruit) tasks.push(new RecruitTask());
-
-      // 日常
-      if (sw.orgBlessing) tasks.push(new OrgBlessingTask());
-      if (sw.abundanceRoom) tasks.push(new AbundanceRoomTask());
-      if (sw.squadRaid) tasks.push(new SquadRaidTask());
-      if (sw.survivalTrial) tasks.push(new SurvivalTrialTask());
-      if (sw.equipSweep) tasks.push(new EquipSweepTask());
-      if (sw.missionHall) tasks.push(new MissionHallTask());
-      if (sw.secretRealm) tasks.push(new SecretRealmTask());
-      if (sw.shopBuy) tasks.push(new ShopBuyTask());
-
-      // 周常
-      if (sw.roadOfPractice) tasks.push(new RoadOfPracticeTask());
-      if (sw.chaseAkatsuki) tasks.push(new ChaseAkatsukiTask());
-      if (sw.rebelNinja) tasks.push(new RebelNinjaTask());
-      if (sw.orgFortress) tasks.push(new OrgFortressTask());
-      if (sw.heavenEarth) tasks.push(new HeavenEarthTask());
-
-      return tasks;
+    _map: {
+      collectGold: CollectGoldTask, collectMail: CollectMailTask,
+      collectSign: CollectSignTask, shareDaily: ShareDailyTask,
+      sendStamina: SendStaminaTask, collectIntel: CollectIntelTask,
+      collectRank: CollectRankTask, collectActive: CollectActiveTask,
+      collectNinjutsu: CollectNinjutsuTask, recruit: RecruitTask,
+      orgBlessing: OrgBlessingTask, abundanceRoom: AbundanceRoomTask,
+      squadRaid: SquadRaidTask, survivalTrial: SurvivalTrialTask,
+      equipSweep: EquipSweepTask, missionHall: MissionHallTask,
+      secretRealm: SecretRealmTask, shopBuy: ShopBuyTask,
+      roadOfPractice: RoadOfPracticeTask, chaseAkatsuki: ChaseAkatsukiTask,
+      rebelNinja: RebelNinjaTask, orgFortress: OrgFortressTask,
+      heavenEarth: HeavenEarthTask,
     },
 
-    createSingle(taskName) {
-      const map = {
-        collectGold: CollectGoldTask, collectMail: CollectMailTask,
-        collectSign: CollectSignTask, shareDaily: ShareDailyTask,
-        sendStamina: SendStaminaTask, collectIntel: CollectIntelTask,
-        collectRank: CollectRankTask, collectActive: CollectActiveTask,
-        collectNinjutsu: CollectNinjutsuTask, recruit: RecruitTask,
-        orgBlessing: OrgBlessingTask, abundanceRoom: AbundanceRoomTask,
-        squadRaid: SquadRaidTask, survivalTrial: SurvivalTrialTask,
-        equipSweep: EquipSweepTask, missionHall: MissionHallTask,
-        secretRealm: SecretRealmTask, shopBuy: ShopBuyTask,
-        roadOfPractice: RoadOfPracticeTask, chaseAkatsuki: ChaseAkatsukiTask,
-        rebelNinja: RebelNinjaTask, orgFortress: OrgFortressTask,
-        heavenEarth: HeavenEarthTask,
-      };
-      const TaskClass = map[taskName];
-      return TaskClass ? new TaskClass() : null;
+    createAll(config) {
+      const sw = config.get('taskSwitches');
+      return Object.entries(this._map)
+        .filter(([key]) => sw[key])
+        .map(([, Cls]) => new Cls());
+    },
+
+    createSingle(name) {
+      const Cls = this._map[name];
+      return Cls ? new Cls() : null;
+    },
+
+    getByCategory(cat) {
+      return Object.entries(this._map)
+        .filter(([, Cls]) => new Cls().category === cat)
+        .map(([, Cls]) => new Cls());
     }
   };
 
   // ============================================================
-  //  ui.js — 控制面板
+  //  UI — 控制面板
   // ============================================================
-  const UI_STYLES = `
-    #naruto-auto-panel {
-      position: fixed;
-      top: 10px;
-      right: 10px;
-      width: 320px;
-      background: linear-gradient(135deg, #1a1a2e, #16213e);
-      border: 1px solid #e94560;
-      border-radius: 12px;
-      color: #eee;
-      font-family: 'Microsoft YaHei', sans-serif;
-      font-size: 13px;
-      z-index: 999999;
-      box-shadow: 0 4px 20px rgba(233, 69, 96, 0.3);
-      user-select: none;
-      overflow: hidden;
-    }
-    #naruto-auto-panel .panel-header {
-      background: linear-gradient(90deg, #e94560, #0f3460);
-      padding: 10px 15px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      cursor: move;
-    }
-    #naruto-auto-panel .panel-header h3 {
-      margin: 0;
-      font-size: 14px;
-      color: #fff;
-    }
-    #naruto-auto-panel .panel-header .close-btn {
-      cursor: pointer;
-      color: #fff;
-      font-size: 18px;
-      width: 24px;
-      height: 24px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 50%;
-      transition: background 0.2s;
-    }
-    #naruto-auto-panel .panel-header .close-btn:hover {
-      background: rgba(255,255,255,0.2);
-    }
-    #naruto-auto-panel .panel-body {
-      padding: 12px 15px;
-      max-height: 500px;
-      overflow-y: auto;
-    }
-    #naruto-auto-panel .section {
-      margin-bottom: 12px;
-    }
-    #naruto-auto-panel .section-title {
-      font-size: 12px;
-      color: #e94560;
-      margin-bottom: 6px;
-      font-weight: bold;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-    #naruto-auto-panel .btn-row {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    #naruto-auto-panel .btn {
-      flex: 1;
-      padding: 8px 12px;
-      border: 1px solid #e94560;
-      background: transparent;
-      color: #e94560;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 12px;
-      transition: all 0.2s;
-      text-align: center;
-    }
-    #naruto-auto-panel .btn:hover {
-      background: #e94560;
-      color: #fff;
-    }
-    #naruto-auto-panel .btn.primary {
-      background: #e94560;
-      color: #fff;
-    }
-    #naruto-auto-panel .btn.primary:hover {
-      background: #c73650;
-    }
-    #naruto-auto-panel .btn:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-    #naruto-auto-panel .status-bar {
-      background: rgba(0,0,0,0.3);
-      padding: 8px 12px;
-      border-radius: 6px;
-      margin-bottom: 8px;
-      font-size: 11px;
-    }
-    #naruto-auto-panel .status-bar .label {
-      color: #888;
-    }
-    #naruto-auto-panel .status-bar .value {
-      color: #0f3460;
-      font-weight: bold;
-    }
-    #naruto-auto-panel .task-list {
-      max-height: 200px;
-      overflow-y: auto;
-    }
-    #naruto-auto-panel .task-item {
-      display: flex;
-      align-items: center;
-      padding: 4px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
-    #naruto-auto-panel .task-item .task-status {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 8px;
-      flex-shrink: 0;
-    }
-    #naruto-auto-panel .task-item .task-status.pending { background: #555; }
-    #naruto-auto-panel .task-item .task-status.running { background: #f39c12; animation: pulse 1s infinite; }
-    #naruto-auto-panel .task-item .task-status.done { background: #2ecc71; }
-    #naruto-auto-panel .task-item .task-status.failed { background: #e74c3c; }
-    #naruto-auto-panel .task-item .task-name {
-      flex: 1;
-      font-size: 12px;
-    }
-    #naruto-auto-panel .task-item .task-time {
-      font-size: 10px;
-      color: #888;
-    }
-    #naruto-auto-panel .log-area {
-      background: rgba(0,0,0,0.4);
-      padding: 8px;
-      border-radius: 6px;
-      max-height: 120px;
-      overflow-y: auto;
-      font-family: monospace;
-      font-size: 11px;
-      line-height: 1.6;
-      color: #aaa;
-    }
-    #naruto-auto-panel .log-area .log-info { color: #3498db; }
-    #naruto-auto-panel .log-area .log-warn { color: #f39c12; }
-    #naruto-auto-panel .log-area .log-error { color: #e74c3c; }
-    #naruto-auto-panel .log-area .log-success { color: #2ecc71; }
-    #naruto-auto-panel .checkbox-group {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 4px;
-    }
-    #naruto-auto-panel .checkbox-item {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11px;
-    }
-    #naruto-auto-panel .checkbox-item input {
-      accent-color: #e94560;
-    }
-    #naruto-auto-panel .minimize-btn {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      width: 30px;
-      height: 30px;
-      background: #e94560;
-      border: none;
-      border-radius: 50%;
-      color: #fff;
-      cursor: pointer;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      font-size: 16px;
-      z-index: 1000000;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
+  const UI_CSS = `
+    #na-panel{position:fixed;top:10px;right:10px;width:320px;background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #e94560;border-radius:12px;color:#eee;font-family:'Microsoft YaHei',sans-serif;font-size:13px;z-index:999999;box-shadow:0 4px 20px rgba(233,69,96,.3);user-select:none;overflow:hidden}
+    #na-panel .hd{background:linear-gradient(90deg,#e94560,#0f3460);padding:10px 15px;display:flex;justify-content:space-between;align-items:center;cursor:move}
+    #na-panel .hd h3{margin:0;font-size:14px;color:#fff}
+    #na-panel .hd .x{cursor:pointer;font-size:18px;width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background .2s}
+    #na-panel .hd .x:hover{background:rgba(255,255,255,.2)}
+    #na-panel .bd{padding:12px 15px;max-height:520px;overflow-y:auto}
+    #na-panel .sec{margin-bottom:10px}
+    #na-panel .st{font-size:11px;color:#e94560;margin-bottom:5px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+    #na-panel .br{display:flex;gap:6px;margin-bottom:6px}
+    #na-panel .btn{flex:1;padding:7px 10px;border:1px solid #e94560;background:0 0;color:#e94560;border-radius:6px;cursor:pointer;font-size:11px;transition:all .2s;text-align:center}
+    #na-panel .btn:hover{background:#e94560;color:#fff}
+    #na-panel .btn.pri{background:#e94560;color:#fff}
+    #na-panel .btn.pri:hover{background:#c73650}
+    #na-panel .btn:disabled{opacity:.4;cursor:not-allowed}
+    #na-panel .sb{background:rgba(0,0,0,.3);padding:7px 10px;border-radius:6px;margin-bottom:6px;font-size:11px;display:flex;flex-wrap:wrap;gap:4px 12px}
+    #na-panel .sb .l{color:#888}#na-panel .sb .v{color:#3498db;font-weight:700}
+    #na-panel .tl{max-height:160px;overflow-y:auto}
+    #na-panel .ti{display:flex;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+    #na-panel .ti .dot{width:8px;height:8px;border-radius:50%;margin-right:6px;flex-shrink:0}
+    #na-panel .ti .dot.pending{background:#555}#na-panel .ti .dot.running{background:#f39c12;animation:pulse 1s infinite}
+    #na-panel .ti .dot.done{background:#2ecc71}#na-panel .ti .dot.failed{background:#e74c3c}
+    #na-panel .ti .nm{flex:1;font-size:11px}#na-panel .ti .tm{font-size:10px;color:#888}
+    #na-panel .la{background:rgba(0,0,0,.4);padding:6px;border-radius:6px;max-height:110px;overflow-y:auto;font-family:monospace;font-size:10px;line-height:1.5;color:#aaa}
+    #na-panel .la .i{color:#3498db}#na-panel .la .w{color:#f39c12}#na-panel .la .e{color:#e74c3c}#na-panel .la .s{color:#2ecc71}
+    #na-panel .cg{display:grid;grid-template-columns:1fr 1fr;gap:3px}
+    #na-panel .ci{display:flex;align-items:center;gap:3px;font-size:10px}
+    #na-panel .ci input{accent-color:#e94560}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   `;
 
   class ControlPanel {
-    constructor(scheduler, config) {
+    constructor(scheduler, config, coordRecorder) {
       this.scheduler = scheduler;
       this.config = config;
+      this.recorder = coordRecorder;
       this.panel = null;
-      this.logBuffer = [];
-      this.maxLogLines = 50;
-      this.dragState = { dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 };
+      this.logs = [];
+      this.maxLogs = 60;
     }
 
     create() {
-      // 注入样式
-      GM_addStyle(UI_STYLES);
-
-      // 创建面板
+      GM_addStyle(UI_CSS);
       this.panel = document.createElement('div');
-      this.panel.id = 'naruto-auto-panel';
-      this.panel.innerHTML = this.getHTML();
+      this.panel.id = 'na-panel';
+      this.panel.innerHTML = this._html();
       document.body.appendChild(this.panel);
-
-      // 绑定事件
-      this.bindEvents();
-
-      // 监听调度器事件
-      this.bindSchedulerEvents();
-
-      Utils.log('info', '控制面板已创建');
+      this._bindEvents();
+      this._bindScheduler();
     }
 
-    getHTML() {
+    _html() {
       const sw = this.config.get('taskSwitches');
-      return `
-        <div class="panel-header" id="na-drag-handle">
-          <h3>🍥 火影忍者自动化</h3>
-          <span class="close-btn" id="na-close">×</span>
-        </div>
-        <div class="panel-body" id="na-panel-body">
-          <!-- 状态栏 -->
-          <div class="status-bar" id="na-status">
-            <span class="label">状态：</span><span class="value" id="na-status-text">就绪</span>
-            <span class="label" style="margin-left:10px">队列：</span><span class="value" id="na-queue-count">0</span>
-            <span class="label" style="margin-left:10px">完成：</span><span class="value" id="na-done-count">0</span>
-          </div>
-
-          <!-- 控制按钮 -->
-          <div class="btn-row">
-            <button class="btn primary" id="na-btn-start">▶ 开始执行</button>
-            <button class="btn" id="na-btn-pause" disabled>⏸ 暂停</button>
-            <button class="btn" id="na-btn-stop" disabled>⏹ 停止</button>
-          </div>
-
-          <!-- 快捷操作 -->
-          <div class="section">
-            <div class="section-title">快捷操作</div>
-            <div class="btn-row">
-              <button class="btn" id="na-btn-collect">🎁 一键收获</button>
-              <button class="btn" id="na-btn-daily">⚔ 日常任务</button>
-            </div>
-            <div class="btn-row">
-              <button class="btn" id="na-btn-weekly">📅 周常任务</button>
-              <button class="btn" id="na-btn-config">⚙ 配置</button>
-            </div>
-          </div>
-
-          <!-- 任务开关 -->
-          <div class="section" id="na-task-switches" style="display:none">
-            <div class="section-title">任务开关</div>
-            <div class="checkbox-group">
-              ${this.generateCheckboxes(sw)}
-            </div>
-            <div class="btn-row" style="margin-top:8px">
-              <button class="btn" id="na-btn-save-config">保存</button>
-              <button class="btn" id="na-btn-reset-config">重置</button>
-            </div>
-          </div>
-
-          <!-- 任务列表 -->
-          <div class="section">
-            <div class="section-title">任务列表</div>
-            <div class="task-list" id="na-task-list"></div>
-          </div>
-
-          <!-- 日志 -->
-          <div class="section">
-            <div class="section-title">运行日志</div>
-            <div class="log-area" id="na-log-area"></div>
-          </div>
-        </div>
-      `;
-    }
-
-    generateCheckboxes(sw) {
       const labels = {
-        collectGold: '招财', collectMail: '邮件', collectSign: '签到',
-        shareDaily: '分享', sendStamina: '赠体力', collectIntel: '情报社',
-        collectRank: '排行榜', collectActive: '活跃度', collectNinjutsu: '忍法帖',
-        recruit: '招募', orgBlessing: '组织祈福', abundanceRoom: '丰饶之间',
-        squadRaid: '小队突袭', survivalTrial: '生存试炼', equipSweep: '装备扫荡',
-        missionHall: '集会所', secretRealm: '秘境', shopBuy: '商店',
-        roadOfPractice: '修行之路', chaseAkatsuki: '追击晓', rebelNinja: '叛忍来袭',
-        orgFortress: '组织要塞', heavenEarth: '天地战场',
+        collectGold:'招财',collectMail:'邮件',collectSign:'签到',shareDaily:'分享',
+        sendStamina:'赠体力',collectIntel:'情报社',collectRank:'排行榜',
+        collectActive:'活跃度',collectNinjutsu:'忍法帖',recruit:'招募',
+        orgBlessing:'组织祈福',abundanceRoom:'丰饶之间',squadRaid:'小队突袭',
+        survivalTrial:'生存试炼',equipSweep:'装备扫荡',missionHall:'集会所',
+        secretRealm:'秘境',shopBuy:'商店',roadOfPractice:'修行之路',
+        chaseAkatsuki:'追击晓',rebelNinja:'叛忍来袭',orgFortress:'组织要塞',
+        heavenEarth:'天地战场',
       };
-      return Object.entries(sw).map(([key, val]) =>
-        `<label class="checkbox-item">
-          <input type="checkbox" data-task="${key}" ${val ? 'checked' : ''}>
-          ${labels[key] || key}
-        </label>`
-      ).join('');
+      return `
+        <div class="hd" id="na-drag"><h3>🍥 火影忍者自动化 v${VERSION}</h3><span class="x" id="na-x">×</span></div>
+        <div class="bd">
+          <div class="sb" id="na-status">
+            <span><span class="l">状态:</span><span class="v" id="na-st">就绪</span></span>
+            <span><span class="l">队列:</span><span class="v" id="na-qc">0</span></span>
+            <span><span class="l">完成:</span><span class="v" id="na-dc">0</span></span>
+            <span><span class="l">失败:</span><span class="v" id="na-fc">0</span></span>
+          </div>
+          <div class="br">
+            <button class="btn pri" id="na-start">▶ 开始</button>
+            <button class="btn" id="na-pause" disabled>⏸</button>
+            <button class="btn" id="na-stop" disabled>⏹</button>
+          </div>
+          <div class="sec">
+            <div class="st">快捷操作</div>
+            <div class="br"><button class="btn" id="na-collect">🎁 收获</button><button class="btn" id="na-daily">⚔ 日常</button><button class="btn" id="na-weekly">📅 周常</button></div>
+            <div class="br"><button class="btn" id="na-record">🎯 录制</button><button class="btn" id="na-cfg">⚙</button><button class="btn" id="na-home">🏠</button></div>
+          </div>
+          <div class="sec" id="na-cfg-panel" style="display:none">
+            <div class="st">任务开关</div>
+            <div class="cg">${Object.entries(sw).map(([k,v])=>`<label class="ci"><input type="checkbox" data-t="${k}" ${v?'checked':''}>${labels[k]||k}</label>`).join('')}</div>
+            <div class="br" style="margin-top:6px"><button class="btn" id="na-save">保存</button><button class="btn" id="na-reset">重置</button></div>
+          </div>
+          <div class="sec"><div class="st">任务</div><div class="tl" id="na-tl"></div></div>
+          <div class="sec"><div class="st">日志</div><div class="la" id="na-log"></div></div>
+        </div>`;
     }
 
-    bindEvents() {
+    _bindEvents() {
+      const p = this.panel;
       // 拖拽
-      const handle = document.getElementById('na-drag-handle');
-      handle.addEventListener('mousedown', (e) => {
-        this.dragState.dragging = true;
-        this.dragState.startX = e.clientX;
-        this.dragState.startY = e.clientY;
-        const rect = this.panel.getBoundingClientRect();
-        this.dragState.origX = rect.left;
-        this.dragState.origY = rect.top;
-        e.preventDefault();
+      let drag = false, sx, sy, ox, oy;
+      p.querySelector('#na-drag').addEventListener('mousedown', e => {
+        drag = true; sx = e.clientX; sy = e.clientY;
+        const r = p.getBoundingClientRect(); ox = r.left; oy = r.top; e.preventDefault();
       });
-      document.addEventListener('mousemove', (e) => {
-        if (!this.dragState.dragging) return;
-        const dx = e.clientX - this.dragState.startX;
-        const dy = e.clientY - this.dragState.startY;
-        this.panel.style.left = (this.dragState.origX + dx) + 'px';
-        this.panel.style.top = (this.dragState.origY + dy) + 'px';
-        this.panel.style.right = 'auto';
+      document.addEventListener('mousemove', e => {
+        if (!drag) return;
+        p.style.left = (ox + e.clientX - sx) + 'px';
+        p.style.top = (oy + e.clientY - sy) + 'px';
+        p.style.right = 'auto';
       });
-      document.addEventListener('mouseup', () => {
-        this.dragState.dragging = false;
-      });
+      document.addEventListener('mouseup', () => drag = false);
 
       // 关闭
-      document.getElementById('na-close').addEventListener('click', () => {
-        this.panel.style.display = 'none';
-      });
+      p.querySelector('#na-x').onclick = () => p.style.display = 'none';
 
       // 开始
-      document.getElementById('na-btn-start').addEventListener('click', async () => {
+      p.querySelector('#na-start').onclick = async () => {
         const tasks = TaskFactory.createAll(this.config);
-        if (tasks.length === 0) {
-          this.addLog('warn', '没有启用的任务');
-          return;
-        }
-        this.scheduler.taskQueue = [];
+        if (!tasks.length) { this.addLog('w', '没有启用的任务'); return; }
+        this.scheduler.queue = [];
         this.scheduler.addTasks(tasks);
-        this.updateTaskList(tasks);
-        document.getElementById('na-btn-start').disabled = true;
-        document.getElementById('na-btn-pause').disabled = false;
-        document.getElementById('na-btn-stop').disabled = false;
+        this._renderTasks(tasks);
+        this._setBtns(true);
         await this.scheduler.start();
-        document.getElementById('na-btn-start').disabled = false;
-        document.getElementById('na-btn-pause').disabled = true;
-        document.getElementById('na-btn-stop').disabled = true;
-      });
+        this._setBtns(false);
+      };
 
       // 暂停/恢复
-      document.getElementById('na-btn-pause').addEventListener('click', () => {
+      p.querySelector('#na-pause').onclick = () => {
         if (this.scheduler.paused) {
           this.scheduler.resume();
-          document.getElementById('na-btn-pause').textContent = '⏸ 暂停';
+          p.querySelector('#na-pause').textContent = '⏸';
         } else {
           this.scheduler.pause();
-          document.getElementById('na-btn-pause').textContent = '▶ 恢复';
+          p.querySelector('#na-pause').textContent = '▶';
         }
-      });
+      };
 
       // 停止
-      document.getElementById('na-btn-stop').addEventListener('click', () => {
+      p.querySelector('#na-stop').onclick = () => {
         this.scheduler.stop();
-        document.getElementById('na-btn-start').disabled = false;
-        document.getElementById('na-btn-pause').disabled = true;
-        document.getElementById('na-btn-stop').disabled = true;
-        document.getElementById('na-btn-pause').textContent = '⏸ 暂停';
-      });
+        this._setBtns(false);
+        p.querySelector('#na-pause').textContent = '⏸';
+      };
 
-      // 一键收获
-      document.getElementById('na-btn-collect').addEventListener('click', async () => {
-        const collectKeys = ['collectGold','collectMail','collectSign','shareDaily',
-          'sendStamina','collectIntel','collectRank','collectActive','collectNinjutsu','recruit'];
-        const tasks = collectKeys.map(k => TaskFactory.createSingle(k)).filter(Boolean);
-        this.scheduler.taskQueue = [];
-        this.scheduler.addTasks(tasks);
-        this.updateTaskList(tasks);
-        await this.scheduler.start();
-      });
+      // 快捷
+      p.querySelector('#na-collect').onclick = () => this._runCategory('collect');
+      p.querySelector('#na-daily').onclick = () => this._runCategory('daily');
+      p.querySelector('#na-weekly').onclick = () => this._runCategory('weekly');
 
-      // 日常任务
-      document.getElementById('na-btn-daily').addEventListener('click', async () => {
-        const dailyKeys = ['orgBlessing','abundanceRoom','squadRaid','survivalTrial',
-          'equipSweep','missionHall','secretRealm','shopBuy'];
-        const tasks = dailyKeys.map(k => TaskFactory.createSingle(k)).filter(Boolean);
-        this.scheduler.taskQueue = [];
-        this.scheduler.addTasks(tasks);
-        this.updateTaskList(tasks);
-        await this.scheduler.start();
-      });
+      // 录制
+      p.querySelector('#na-record').onclick = () => {
+        if (this.recorder.recording) {
+          const coords = this.recorder.stop();
+          p.querySelector('#na-record').textContent = '🎯 录制';
+          this.addLog('s', `录制结束，${coords.length} 个坐标`);
+        } else {
+          this.recorder.start();
+          p.querySelector('#na-record').textContent = '⏹ 停止录制';
+        }
+      };
 
-      // 周常任务
-      document.getElementById('na-btn-weekly').addEventListener('click', async () => {
-        const weeklyKeys = ['roadOfPractice','chaseAkatsuki','rebelNinja','orgFortress','heavenEarth'];
-        const tasks = weeklyKeys.map(k => TaskFactory.createSingle(k)).filter(Boolean);
-        this.scheduler.taskQueue = [];
-        this.scheduler.addTasks(tasks);
-        this.updateTaskList(tasks);
-        await this.scheduler.start();
-      });
+      // 回到主界面
+      p.querySelector('#na-home').onclick = async () => {
+        for (let i = 0; i < 5; i++) {
+          await this.scheduler.op.clickNatural(COORDS.common.back.x, COORDS.common.back.y);
+          await Utils.sleep(500);
+        }
+        this.addLog('i', '已尝试返回主界面');
+      };
 
-      // 配置面板
-      document.getElementById('na-btn-config').addEventListener('click', () => {
-        const el = document.getElementById('na-task-switches');
+      // 配置
+      p.querySelector('#na-cfg').onclick = () => {
+        const el = p.querySelector('#na-cfg-panel');
         el.style.display = el.style.display === 'none' ? 'block' : 'none';
-      });
+      };
 
-      // 保存配置
-      document.getElementById('na-btn-save-config').addEventListener('click', () => {
-        const checkboxes = document.querySelectorAll('#na-task-switches input[type="checkbox"]');
-        checkboxes.forEach(cb => {
-          this.config.set(`taskSwitches.${cb.dataset.task}`, cb.checked);
+      p.querySelector('#na-save').onclick = () => {
+        p.querySelectorAll('#na-cfg-panel input[type=checkbox]').forEach(cb => {
+          this.config.set(`taskSwitches.${cb.dataset.t}`, cb.checked);
         });
         this.config.save();
-        this.addLog('success', '配置已保存');
-      });
+        this.addLog('s', '配置已保存');
+      };
 
-      // 重置配置
-      document.getElementById('na-btn-reset-config').addEventListener('click', () => {
-        this.config.reset();
-        this.addLog('info', '配置已重置为默认值');
-        location.reload();
+      p.querySelector('#na-reset').onclick = () => {
+        if (confirm('确定重置所有配置？')) { this.config.reset(); location.reload(); }
+      };
+    }
+
+    _bindScheduler() {
+      const s = this.scheduler;
+      s.on('start', d => { this.addLog('i', `开始，共 ${d.total} 个任务`); this._setStatus('运行中'); });
+      s.on('taskStart', t => { this.addLog('i', `▶ ${t.name}`); this._setTaskStatus(t, 'running'); });
+      s.on('taskDone', t => {
+        this.addLog('s', `✓ ${t.name} (${Utils.formatDuration(t.endTime - t.startTime)})`);
+        this._setTaskStatus(t, 'done');
+        document.getElementById('na-dc').textContent = s.history.filter(h => h.result === 'success').length;
+      });
+      s.on('taskFailed', ({ task, error }) => {
+        this.addLog('e', `✗ ${task.name}: ${error.message}`);
+        this._setTaskStatus(task, 'failed');
+        document.getElementById('na-fc').textContent = s.history.filter(h => h.result === 'failed').length;
+      });
+      s.on('pause', () => { this._setStatus('已暂停'); this.addLog('w', '已暂停'); });
+      s.on('resume', () => { this._setStatus('运行中'); this.addLog('i', '已恢复'); });
+      s.on('stop', () => { this._setStatus('已停止'); this.addLog('w', '已停止'); });
+      s.on('complete', d => {
+        this._setStatus('完成');
+        this.addLog('s', `🏁 完成！成功 ${d.success}，失败 ${d.failed}`);
       });
     }
 
-    bindSchedulerEvents() {
-      this.scheduler.on('start', (data) => {
-        this.addLog('info', `开始执行，共 ${data.total} 个任务`);
-        document.getElementById('na-status-text').textContent = '运行中';
-      });
-
-      this.scheduler.on('taskStart', (task) => {
-        this.addLog('info', `▶ ${task.name}`);
-        this.updateTaskStatus(task, 'running');
-      });
-
-      this.scheduler.on('taskDone', (task) => {
-        this.addLog('success', `✓ ${task.name} 完成`);
-        this.updateTaskStatus(task, 'done');
-        const done = this.scheduler.history.filter(h => h.result === 'success').length;
-        document.getElementById('na-done-count').textContent = done;
-      });
-
-      this.scheduler.on('taskFailed', ({ task, error }) => {
-        this.addLog('error', `✗ ${task.name} 失败: ${error.message}`);
-        this.updateTaskStatus(task, 'failed');
-      });
-
-      this.scheduler.on('pause', () => {
-        document.getElementById('na-status-text').textContent = '已暂停';
-        this.addLog('warn', '已暂停');
-      });
-
-      this.scheduler.on('resume', () => {
-        document.getElementById('na-status-text').textContent = '运行中';
-        this.addLog('info', '已恢复');
-      });
-
-      this.scheduler.on('stop', () => {
-        document.getElementById('na-status-text').textContent = '已停止';
-        this.addLog('warn', '已停止');
-      });
-
-      this.scheduler.on('complete', (data) => {
-        document.getElementById('na-status-text').textContent = '完成';
-        this.addLog('success', `全部完成！成功 ${data.success}，失败 ${data.failed}`);
-      });
+    async _runCategory(cat) {
+      const tasks = TaskFactory.getByCategory(cat);
+      if (!tasks.length) return;
+      this.scheduler.queue = [];
+      this.scheduler.addTasks(tasks);
+      this._renderTasks(tasks);
+      this._setBtns(true);
+      await this.scheduler.start();
+      this._setBtns(false);
     }
 
-    updateTaskList(tasks) {
-      const list = document.getElementById('na-task-list');
-      list.innerHTML = tasks.map(t =>
-        `<div class="task-item" data-task-name="${t.name}">
-          <span class="task-status ${t.status}"></span>
-          <span class="task-name">${t.name}</span>
-          <span class="task-time"></span>
-        </div>`
+    _setBtns(running) {
+      const $ = id => document.getElementById(id);
+      $('na-start').disabled = running;
+      $('na-pause').disabled = !running;
+      $('na-stop').disabled = !running;
+    }
+
+    _setStatus(text) {
+      const el = document.getElementById('na-st');
+      if (el) el.textContent = text;
+    }
+
+    _renderTasks(tasks) {
+      const el = document.getElementById('na-tl');
+      if (!el) return;
+      el.innerHTML = tasks.map(t =>
+        `<div class="ti" data-n="${t.name}"><span class="dot ${t.status}"></span><span class="nm">${t.name}</span><span class="tm"></span></div>`
       ).join('');
     }
 
-    updateTaskStatus(task, status) {
-      const item = document.querySelector(`.task-item[data-task-name="${task.name}"]`);
-      if (item) {
-        const dot = item.querySelector('.task-status');
-        dot.className = `task-status ${status}`;
-        if (status === 'done' || status === 'failed') {
-          const time = item.querySelector('.task-time');
-          time.textContent = Utils.formatDuration(task.endTime - task.startTime);
-        }
+    _setTaskStatus(task, status) {
+      const el = document.querySelector(`.ti[data-n="${task.name}"]`);
+      if (!el) return;
+      el.querySelector('.dot').className = `dot ${status}`;
+      if (task.endTime && task.startTime) {
+        el.querySelector('.tm').textContent = Utils.formatDuration(task.endTime - task.startTime);
       }
     }
 
     addLog(level, text) {
-      const area = document.getElementById('na-log-area');
+      const area = document.getElementById('na-log');
       if (!area) return;
       const ts = new Date().toLocaleTimeString();
-      const cls = level === 'error' ? 'log-error' :
-                  level === 'warn' ? 'log-warn' :
-                  level === 'success' ? 'log-success' : 'log-info';
-      this.logBuffer.push(`<span class="${cls}">[${ts}] ${text}</span>`);
-      if (this.logBuffer.length > this.maxLogLines) this.logBuffer.shift();
-      area.innerHTML = this.logBuffer.join('<br>');
+      const cls = level === 'e' ? 'e' : level === 'w' ? 'w' : level === 's' ? 's' : 'i';
+      this.logs.push(`<span class="${cls}">[${ts}] ${text}</span>`);
+      if (this.logs.length > this.maxLogs) this.logs.shift();
+      area.innerHTML = this.logs.join('<br>');
       area.scrollTop = area.scrollHeight;
     }
   }
 
   // ============================================================
-  //  main.js — 主入口
+  //  NarutoAuto — 主入口
   // ============================================================
   class NarutoAuto {
     constructor() {
       this.config = new Config();
       this.operator = new GameOperator();
-      this.scheduler = new TaskScheduler(this.operator, this.config);
-      this.panel = null;
+      this.cookieMgr = new CookieManager();
+      this.sceneDetector = new SceneDetector();
+      this.popupHandler = new PopupHandler(this.operator, this.config);
+      this.scheduler = new TaskScheduler(this.operator, this.config, this.popupHandler);
+      this.coordRecorder = new CoordRecorder();
+      this.panel = new ControlPanel(this.scheduler, this.config, this.coordRecorder);
     }
 
     async init() {
       Utils.log('info', '========================================');
-      Utils.log('info', '  火影忍者云游戏自动化 v0.1.0');
+      Utils.log('info', `  火影忍者云游戏自动化 v${VERSION}`);
       Utils.log('info', '========================================');
 
-      // 检查是否在云游戏页面
-      const isCloudGame = window.location.href.includes('start.qq.com') ||
-                          window.location.href.includes('gamer.qq.com');
-
-      if (!isCloudGame) {
-        Utils.log('warn', '当前不在云游戏页面，脚本不启动');
+      // 检查页面
+      const url = location.href;
+      if (!url.includes('start.qq.com') && !url.includes('gamer.qq.com')) {
+        Utils.log('info', '非云游戏页面，脚本不启动');
         return;
       }
 
-      // 初始化 TCGSDK
-      const sdkReady = await this.operator.init();
-      if (!sdkReady) {
-        Utils.log('warn', 'TCGSDK 未就绪，面板仍会显示（可手动重试）');
+      // 检查登录态
+      if (!this.cookieMgr.checkLoginState()) {
+        Utils.log('warn', '未检测到登录态');
+        // 等一下再检查，页面可能还在加载
+        await Utils.sleep(3000);
+        if (!this.cookieMgr.checkLoginState()) {
+          this.cookieMgr.showLoginAlert();
+          return;
+        }
       }
 
-      // 创建控制面板
-      this.panel = new ControlPanel(this.scheduler, this.config);
+      // 初始化 TCGSDK
+      const ok = await this.operator.init();
+      if (!ok) {
+        Utils.log('warn', 'TCGSDK 未就绪，面板仍会显示');
+      }
+
+      // 创建 UI
       this.panel.create();
 
-      // 全局引用（调试用）
+      // 全局调试引用
       window.__narutoAuto = {
         config: this.config,
         operator: this.operator,
         scheduler: this.scheduler,
         panel: this.panel,
         coords: COORDS,
+        recorder: this.coordRecorder,
       };
 
-      Utils.log('info', '初始化完成，等待操作...');
+      Utils.log('info', '✓ 初始化完成，等待操作...');
     }
   }
 
   // 启动
-  const app = new NarutoAuto();
-  app.init().catch(err => {
+  new NarutoAuto().init().catch(err => {
     console.error('[NarutoAuto] 初始化失败:', err);
   });
 
