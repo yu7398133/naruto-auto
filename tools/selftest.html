@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="AdGAQC7vJSddqAsB5G5zZr">
+<head data-page-node-id="WyIr4e60EUQNIU1sWQfcrD">
+<meta charset="UTF-8" data-page-node-id="ZgzESkQArJYz0UHgMmoHD2">
+<title>naruto-auto 自测环境</title>
+<style>
+  body{margin:0;background:#111;color:#ddd;font:13px/1.6 "Microsoft YaHei",sans-serif;padding:16px}
+  #wrap{position:relative;width:640px;height:360px}
+  #gmsdk-video-element{width:640px;height:360px;background:#000;display:block}
+  .bar{margin:12px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  button{padding:6px 12px;border:1px solid #e94560;background:transparent;color:#e94560;border-radius:6px;cursor:pointer}
+  button:hover{background:#e94560;color:#fff}
+  code{background:#000;padding:2px 6px;border-radius:4px}
+  #log{background:#000;border:1px solid #333;border-radius:6px;padding:8px;height:180px;overflow:auto;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap}
+</style>
+</head>
+<body data-page-node-id="S0kobzFwcWLf2GF9ksb7HG">
+<h2 data-page-node-id="T9FXZLjQU1lwFiAbKpltGd">🧪 naruto-auto 自测环境</h2>
+<p data-page-node-id="JluOwx8pRNb1OBXZXIFUUq">本页用 <code data-page-node-id="hiYB3uj80xmqdBdAPmMvkR">canvas.captureStream()</code> 伪造一个 1280×720 的云游戏画面，并提供假的
+<code data-page-node-id="OYClCfVIzFwqGn57KanKlo">window.TCGSDK</code>，用来在无登录、无真实游戏的情况下验证脚本的
+<strong data-page-node-id="Ze0AeBTTA83mDfvwBTFIxQ">画面捕获 / 场景判定 / 点击下发 / 任务调度 / 面板</strong> 是否正常。</p>
+
+<div id="wrap" data-page-node-id="TBuNshCbBuYx6Y7FiVafp2">
+  <video id="gmsdk-video-element" muted autoplay playsinline data-page-node-id="DXSNK3VVURM3n9OSSda8to"></video>
+</div>
+
+<div class="bar" data-page-node-id="AHkrzu2Th1ystfPSyD88FR">
+  <span data-page-node-id="qYRxdCtWBIlbX6Y7ddh2yz">场景：</span>
+  <button data-s="home" data-page-node-id="NYvnGaE6JUhkCqutU3IhzV">主界面</button>
+  <button data-s="popup" data-page-node-id="Erqra7GuYNal77HU3bQyrA">弹窗</button>
+  <button data-s="battle" data-page-node-id="WqTstuWK99gK9sokAkAJUV">战斗</button>
+  <button data-s="battleEnd" data-page-node-id="cSKTGg5dA80Uh3PN82HG8J">结算</button>
+  <button data-s="loading" data-page-node-id="9jIKlyNOjs8pyjscQsWTR2">黑屏</button>
+  <button data-s="other" data-page-node-id="skrMqnGVUGrN70ziolIxZI">其它</button>
+  <button id="clicks" data-page-node-id="1gv3Qozma7Xk5CS1ri8HGW">查看已下发点击</button>
+</div>
+<div id="log" data-page-node-id="wReedlHVUgTmTf3cWhvX8v"></div>
+
+<script>
+/* ---------- 伪造的云游戏画面 ---------- */
+const W = 1280, H = 720;
+const src = document.createElement('canvas');
+src.width = W; src.height = H;
+const sctx = src.getContext('2d');
+
+const PATCHES = {
+  home: [
+    [[66,14,120,84],[173,141,118]],
+    [[1203,232,1244,286],[178,164,141]],
+    [[25,253,90,307],[162,155,86]],
+    [[1189,320,1272,392],[85,77,70]],
+  ],
+  popup: [
+    [[1185,2,1272,70],[70,38,22]],
+    [[66,14,120,84],[173,141,118]],
+  ],
+  battle: [
+    [[60,510,160,610],[80,80,120]],
+    [[1080,510,1230,630],[120,70,50]],
+  ],
+  battleEnd: [
+    [[500,150,780,250],[200,170,60]],
+    [[560,580,720,630],[180,140,50]],
+  ],
+  loading: [],
+  other: [
+    [[300,300,400,360],[10,120,200]],
+  ],
+};
+
+let scene = 'home';
+window.__setScene = s => { scene = s; log('场景切换 → ' + s); };
+
+function drawFrame() {
+  if (scene === 'loading') {
+    sctx.fillStyle = '#050505';
+    sctx.fillRect(0, 0, W, H);
+  } else {
+    sctx.fillStyle = '#203040';
+    sctx.fillRect(0, 0, W, H);
+    for (const [area, rgb] of (PATCHES[scene] || [])) {
+      sctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      sctx.fillRect(area[0], area[1], area[2] - area[0], area[3] - area[1]);
+    }
+    // 关闭按钮是有图形的（内部有 X），用叠加笔画模拟真实纹理
+    if (scene === 'popup') {
+      const [x1, y1, x2, y2] = [1185, 2, 1272, 70];
+      sctx.strokeStyle = 'rgb(200,140,70)';
+      sctx.lineWidth = 6;
+      sctx.beginPath();
+      sctx.moveTo(x1 + 18, y1 + 16); sctx.lineTo(x2 - 18, y2 - 16);
+      sctx.moveTo(x2 - 18, y1 + 16); sctx.lineTo(x1 + 18, y2 - 16);
+      sctx.stroke();
+    }
+    // 让画面持续变化，模拟动画（用于帧差异测试）
+    sctx.fillStyle = `hsl(${(Date.now() / 20) % 360},60%,50%)`;
+    sctx.fillRect(600, 400, 40, 40);
+  }
+  requestAnimationFrame(drawFrame);
+}
+drawFrame();
+
+const video = document.getElementById('gmsdk-video-element');
+video.srcObject = src.captureStream(30);
+video.play().catch(() => {});
+
+/* ---------- 伪造的 TCGSDK ---------- */
+window.__clicks = [];
+window.TCGSDK = {
+  sendMouseEvent(e) {
+    if (e.type === 'mousedown') { window.__clicks.push({ x: e.x, y: e.y, t: Date.now() }); log(`click (${e.x}, ${e.y})`); }
+  },
+  sendRawEvent(e) { log('raw ' + e.type); },
+  sendKeyboardEvent(e) { log('key ' + e.type + ' ' + e.key); },
+};
+
+/* ---------- 面板日志同步 ---------- */
+const logBox = document.getElementById('log');
+function log(s) { logBox.textContent += s + '\n'; logBox.scrollTop = logBox.scrollHeight; }
+window.__log = log;
+
+document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => window.__setScene(b.dataset.s));
+document.getElementById('clicks').onclick = () => {
+  log('已下发点击: ' + JSON.stringify(window.__clicks));
+  console.log('CLICKS', window.__clicks);
+};
+</script>
+
+<!-- 被测脚本 -->
+<script src="../naruto-auto.user.js"></script>
+</body>
+</html>

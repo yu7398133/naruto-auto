@@ -1,7 +1,7 @@
 {
   "name": "naruto-auto",
-  "version": "0.2.1",
-  "description": "火影忍者云游戏自动化脚本 - 基于TCGSDK",
+  "version": "0.5.62",
+  "description": "火影忍者云游戏自动化脚本 - TCGSDK / gamematrix 通用适配，视觉场景检测 + 任务调度",
   "author": "naruto-auto",
   "license": "MIT",
   "homepage": "https://github.com/yu7398133/naruto-auto",
@@ -14,7 +14,9 @@
     "火影忍者",
     "automation",
     "tcgsdk",
+    "gamematrix",
     "cloud-gaming",
-    "tampermonkey"
+    "tampermonkey",
+    "vision"
   ]
 }

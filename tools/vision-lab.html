@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>火影自动化 · 视觉标定实验室</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--acc:#e94560;--txt:#d7dbe3;--dim:#8b93a3}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{margin:0;font-size:16px}
+  header .sub{color:var(--dim);font-size:12px}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:16px;padding:16px}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:34px;text-align:center;color:var(--dim);cursor:pointer}
+  .drop.over{border-color:var(--acc);color:var(--acc)}
+  #stageWrap{position:relative;margin-top:12px;display:none}
+  #stage{max-width:100%;display:block;cursor:crosshair;border-radius:8px}
+  #zoom{position:absolute;pointer-events:none;border:1px solid var(--acc);width:120px;height:68px;overflow:hidden;display:none;background:#000}
+  #zoom canvas{width:100%;height:100%;image-rendering:pixelated}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}
+  button{background:transparent;border:1px solid var(--acc);color:var(--acc);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+  button:hover{background:var(--acc);color:#fff}
+  button.ghost{border-color:var(--line);color:var(--dim)}
+  button.ghost:hover{background:var(--line);color:var(--txt)}
+  input,select{background:#0d0f14;border:1px solid var(--line);color:var(--txt);border-radius:5px;padding:4px 6px;font-size:12px}
+  input[type=number]{width:66px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left}
+  th{color:var(--dim);font-weight:600}
+  td input{width:100%}
+  .sw{display:inline-block;width:16px;height:16px;border-radius:3px;vertical-align:-3px;border:1px solid #000}
+  code,pre{font-family:Consolas,monospace;font-size:11px}
+  pre{background:#0d0f14;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:340px;overflow:auto;white-space:pre-wrap}
+  .hint{color:var(--dim);font-size:12px}
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#222734;color:var(--dim);font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔬 视觉标定实验室</h1>
+  <span class="sub">加载游戏截图（1280×720）→ 框选 UI 元素 → 导出可直接粘贴的探针代码</span>
+</header>
+
+<main>
+  <section class="card">
+    <div class="drop" id="drop">拖入截图，或点击选择文件（PNG / JPG）</div>
+    <input type="file" id="file" accept="image/*" hidden>
+
+    <div class="row">
+      <span class="hint">取样框大小</span>
+      <input type="number" id="boxSize" value="40" min="4" max="400" step="2">
+      <span class="hint">px</span>
+      <span class="hint">| 容差 tol</span>
+      <input type="number" id="tol" value="35" min="1" max="200">
+      <button class="ghost" id="btnClear">清空探针</button>
+      <button class="ghost" id="btnUndo">撤销上一个</button>
+      <span class="tag" id="imgInfo">未加载</span>
+    </div>
+
+    <div id="stageWrap">
+      <canvas id="stage"></canvas>
+      <div id="zoom"><canvas id="zc" width="120" height="68"></canvas></div>
+    </div>
+    <div class="hint" id="tip">提示：在画面上点击即可添加一个探针（以点击点为中心取样）。</div>
+  </section>
+
+  <section class="card">
+    <h3 style="margin:0 0 8px">探针列表 <span class="tag" id="cnt">0</span></h3>
+    <div style="max-height:300px;overflow:auto">
+      <table>
+        <thead><tr><th style="width:90px">名称</th><th style="width:110px">区域</th><th style="width:60px">颜色</th><th style="width:52px">tol</th><th style="width:28px"></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+
+    <h3 style="margin:14px 0 8px">导出</h3>
+    <div class="row">
+      <button id="btnProbes">生成 PROBES 代码</button>
+      <button id="btnCoords">生成 COORDS 代码</button>
+      <button class="ghost" id="btnCopy">复制</button>
+    </div>
+    <pre id="out">// 导出结果会出现在这里</pre>
+  </section>
+</main>
+
+<script>
+const BASE_W = 1280, BASE_H = 720;
+const $ = id => document.getElementById(id);
+const stage = $('stage'), sctx = stage.getContext('2d', { willReadFrequently: true });
+const zc = $('zc'), zctx = zc.getContext('2d');
+let img = null, probes = [];
+
+/* ---------- 载入图片 ---------- */
+$('drop').onclick = () => $('file').click();
+$('drop').addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
+$('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
+$('drop').addEventListener('drop', e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+$('file').onchange = e => { if (e.target.files[0]) loadFile(e.target.files[0]); };
+
+function loadFile(f) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    const im = new Image();
+    im.onload = () => {
+      img = im;
+      stage.width = im.naturalWidth;
+      stage.height = im.naturalHeight;
+      sctx.drawImage(im, 0, 0);
+      $('stageWrap').style.display = 'block';
+      $('drop').style.display = 'none';
+      $('imgInfo').textContent = `${im.naturalWidth}×${im.naturalHeight}` +
+        (im.naturalWidth === BASE_W && im.naturalHeight === BASE_H ? ' ✅基准' : ' ⚠非基准，坐标按原图输出');
+      draw();
+    };
+    im.src = fr.result;
+  };
+  fr.readAsDataURL(f);
+}
+
+function avg(x, y, w, h) {
+  x = Math.max(0, Math.min(stage.width - 1, Math.round(x)));
+  y = Math.max(0, Math.min(stage.height - 1, Math.round(y)));
+  w = Math.max(1, Math.min(stage.width - x, Math.round(w)));
+  h = Math.max(1, Math.min(stage.height - y, Math.round(h)));
+  const d = sctx.getImageData(x, y, w, h).data;
+  let r = 0, g = 0, b = 0;
+  const n = d.length / 4;
+  for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; }
+  return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+}
+
+/* ---------- 交互 ---------- */
+function toImg(e) {
+  const r = stage.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * stage.width / r.width,
+    y: (e.clientY - r.top) * stage.height / r.height
+  };
+}
+
+stage.addEventListener('mousemove', e => {
+  if (!img) return;
+  const p = toImg(e), half = (+$('boxSize').value || 40) / 2;
+  const box = { x: p.x - half, y: p.y - half, w: half * 2, h: half * 2 };
+  draw(box);
+  const zw = 20, zh = 12; // 放大倍率约 6x
+  zctx.imageSmoothingEnabled = false;
+  zctx.clearRect(0, 0, zc.width, zc.height);
+  zctx.drawImage(stage, Math.max(0, p.x - zw / 2), Math.max(0, p.y - zh / 2), zw, zh, 0, 0, zc.width, zc.height);
+  const wrap = $('stageWrap').getBoundingClientRect();
+  $('zoom').style.display = 'block';
+  $('zoom').style.left = (e.clientX - wrap.left + 16) + 'px';
+  $('zoom').style.top = (e.clientY - wrap.top + 16) + 'px';
+  const c = avg(box.x, box.y, box.w, box.h);
+  $('tip').textContent = `(${Math.round(p.x)}, ${Math.round(p.y)})  rgb(${c.r}, ${c.g}, ${c.b})  — 点击添加探针`;
+});
+stage.addEventListener('mouseleave', () => { $('zoom').style.display = 'none'; });
+
+stage.addEventListener('click', e => {
+  if (!img) return;
+  const p = toImg(e), half = (+$('boxSize').value || 40) / 2;
+  const x1 = Math.round(p.x - half), y1 = Math.round(p.y - half);
+  const x2 = Math.round(p.x + half), y2 = Math.round(p.y + half);
+  const c = avg(x1, y1, x2 - x1, y2 - y1);
+  probes.push({
+    label: 'probe_' + probes.length,
+    area: [x1, y1, x2, y2],
+    color: c,
+    tol: +$('tol').value || 35,
+    click: [Math.round(p.x), Math.round(p.y)]
+  });
+  render();
+});
+
+function draw(hover) {
+  if (!img) return;
+  sctx.clearRect(0, 0, stage.width, stage.height);
+  sctx.drawImage(img, 0, 0);
+  probes.forEach((p, i) => {
+    const [x1, y1, x2, y2] = p.area;
+    sctx.strokeStyle = '#2ecc71'; sctx.lineWidth = 1.5;
+    sctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    sctx.fillStyle = '#2ecc71';
+    sctx.font = '14px monospace';
+    sctx.fillText(String(i + 1), x1 + 2, y1 + 14);
+    sctx.beginPath();
+    sctx.arc(p.click[0], p.click[1], 3, 0, 7);
+    sctx.fillStyle = '#e94560'; sctx.fill();
+  });
+  if (hover) {
+    sctx.strokeStyle = '#e94560'; sctx.lineWidth = 1;
+    sctx.setLineDash([4, 3]);
+    sctx.strokeRect(hover.x, hover.y, hover.w, hover.h);
+    sctx.setLineDash([]);
+  }
+}
+
+function render() {
+  const tb = $('rows');
+  $('cnt').textContent = probes.length;
+  tb.innerHTML = probes.map((p, i) => `
+    <tr>
+      <td><input value="${p.label}" data-i="${i}" data-f="label"></td>
+      <td><input value="${p.area.join(',')}" data-i="${i}" data-f="area"></td>
+      <td><span class="sw" style="background:rgb(${p.color.r},${p.color.g},${p.color.b})"></span> ${p.color.r},${p.color.g},${p.color.b}</td>
+      <td><input type="number" value="${p.tol}" data-i="${i}" data-f="tol" style="width:52px"></td>
+      <td><button class="ghost" data-del="${i}" style="padding:2px 6px">×</button></td>
+    </tr>`).join('');
+  draw();
+}
+
+$('rows').addEventListener('input', e => {
+  const i = e.target.dataset.i, f = e.target.dataset.f;
+  if (i === undefined) return;
+  if (f === 'area') {
+    const a = e.target.value.split(/[,\s]+/).map(Number);
+    if (a.length === 4 && a.every(n => !isNaN(n))) probes[i].area = a;
+  } else if (f === 'tol') {
+    probes[i].tol = +e.target.value || 35;
+  } else {
+    probes[i].label = e.target.value;
+  }
+  draw();
+});
+$('rows').addEventListener('click', e => {
+  const d = e.target.dataset.del;
+  if (d !== undefined) { probes.splice(+d, 1); render(); }
+});
+$('btnUndo').onclick = () => { probes.pop(); render(); };
+$('btnClear').onclick = () => { probes = []; render(); };
+
+/* ---------- 导出 ---------- */
+$('btnProbes').onclick = () => {
+  if (!probes.length) return;
+  $('out').textContent = '// === 视觉探针（粘贴到 PROBES 对象）===\n' +
+    probes.map(p =>
+      `  ${p.label}: { area: [${p.area.join(', ')}], color: { r: ${p.color.r}, g: ${p.color.g}, b: ${p.color.b} }, ` +
+      `tol: ${p.tol}, click: [${p.click[0]}, ${p.click[1]}], label: '${p.label}', verified: true },`
+    ).join('\n');
+};
+$('btnCoords').onclick = () => {
+  if (!probes.length) return;
+  $('out').textContent = '// === 坐标点（粘贴到 COORDS 对应分组）===\n' +
+    probes.map(p => `  ${p.label}: { x: ${p.click[0]}, y: ${p.click[1]} },`).join('\n');
+};
+$('btnCopy').onclick = () => {
+  navigator.clipboard.writeText($('out').textContent)
+    .then(() => alert('已复制'))
+    .catch(() => alert('复制失败，请手动选中复制'));
+};
+</script>
+</body>
+</html>
