@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.5.63
+// @version      0.5.65
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.5.63'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.5.65'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1474,9 +1474,16 @@
     //   小队突袭结算页是全屏「胜利」金橙大字 + 奖励图标墙（背景水墨黑），与角斗场横幅完全不同，
     //   旧 victoryBanner [170,180,400,420] 打不到 → 小队突袭战斗结束只能靠「画面静止」或超时兜底。
     //   取「胜利」二字笔画密集区 48x48 @ (500,140)：结算帧 (218,137,15)/std32；
-    //   战斗帧 (210,204,200) d=260、BOSS 页 (84,83,78) d=251 → tol 55 分离充足。
+    //   战斗帧 (210,204,200) d=260、BOSS 页 (84,83,78) d=251 → 色距分离充足。
     //   同归 BATTLE_END 计局（见 SCENE_RULES），waitForEnd 的「连续 2 拍 / 黑屏序列」落判不变。
-    squadVictory:{ area: [500, 140, 548, 188],     color: { r: 218, g: 137, b: 15 },  tol: 55, label: '小队突袭胜利大字', verified: true, note: '0.5.63 新增：小队突袭结算页「胜利」大字主体；失败局未录制，仍由静止/超时兜底' },
+    // ⚠ 0.5.65 收紧 tol 55→25 + minStd 24（用户录制「忍术对战5.json」120 帧实测发现的误判）：
+    //   忍术对战（角斗场）打完一局后的**房间页**是整屏均匀浅色界面，该区恰好也是金橙色
+    //   → 旧 tol 55 下房间页 d=29.9/37.1/52.9 全部误命中，被判成 BATTLE_END。后果：
+    //   ① waitForEnd 刚判完一局，房间页又命中一次 → 「这一把到底结束没有」分不清；
+    //   ② clearSettlement 把房间页当结算页乱点（可能点掉「选对手/开始对战」）。
+    //   实测分离度：小队突袭结算帧 d=0.9/3.6、std=31.7/31.8；忍术对战房间页 d=29.9~52.9、std≤21.9。
+    //   → tol 25（小队突袭侧裕度 21，房间页侧裕度 4.9）+ minStd 24（房间页 std 21.9 再挡一道）。
+    squadVictory:{ area: [500, 140, 548, 188],     color: { r: 218, g: 137, b: 15 },  tol: 25, minStd: 24, label: '小队突袭胜利大字', verified: true, note: '0.5.65 收紧：tol 55→25 + minStd 24，避免忍术对战房间页（金橙浅色整屏）误判为结算' },
     // 0.5.63 新增（2026-09-16 用户录制「组织祈福2.json」实测）：
     //   「今日次数已用完」提示弹窗，取弹窗左下纯底色区 [400,300,480,340]：
     //   有弹窗 (187,175,149)/std0.8；无弹窗（祈福页供桌暗区）(37,21,16) d=437、主界面 (154,202,150) d=61 → tol 20 稳。
@@ -2799,23 +2806,40 @@
      *  之所以不只看 SCENE.BATTLE：战斗探针是按某张地图实测的，换地图可能判不出战斗
      *  （代码里 waitForEnd 也备注过这点），所以补一个「画面是否持续变化」的时间维度判据。
      */
-    async detectNextRound(ms) {
-      const end = Date.now() + (ms || 9000);
-      const region = [260, 90, 1020, 560];
-      const thr = this.config.get('vision.diffThreshold') || 0.012;
-      try { this.vision.snapshot(region); } catch (e) { /* 视觉不可用则只靠场景判定 */ }
-      let moving = 0;
+    /**
+     * 0.5.65 重写（用户录制「忍术对战5.json」120 帧实测）：判据从「画面是否在动」
+     * 换成「结算流程走完没、回到房间页没」。
+     *
+     * 实测一局的完整节奏（帧号取自该录制）：
+     *   ① 战斗中（scene=other —— 战斗探针是按别的地图标定的，这张图判不出 BATTLE）
+     *   ② 「胜负已分」金横幅 victoryBanner（d=9~26 极稳，持续约 1.5s）→ waitForEnd 在此返回
+     *      = **这一把打完了**（f1-4 / f84-91）
+     *   ③ 结算过场动画（约 9s，scene=other，画面持续变化）
+     *   ④ 房间页：整屏均匀浅色界面，titleDaily 命中 → SCENE.DAILY（f15-16 / f100-101）
+     *      = **这一把彻底结束，可以开下一把了**
+     *   ⑤ 游戏自动开下一局（或停在房间页等手动点「选对手 → 开始对战」）
+     *
+     * 旧实现只看「画面是否在动」→ ③ 的过场动画会被当成「已自动续局」→ 不点选对手，
+     * 结果停在房间页干等；而且 ④ 的房间页在 0.5.65 前会被 squadVictory 误判成 BATTLE_END，
+     * 「这一把结束没有」根本分不清。现在改成显式等房间页。
+     *
+     * @returns {'room'|'battle'|'home'|'timeout'}
+     *   room    = 已回房间页，需要手动点「选对手 / 开始对战」
+     *   battle  = 游戏已自动开下一局，不用点
+     *   home    = 意外回了主界面（交给上层兜底）
+     *   timeout = 都没等到（多半是过场比预期长），调用方按「需要手动开」兜底
+     */
+    async waitRoomPage(ms) {
+      const end = Date.now() + (ms || 16000);
       while (Date.now() < end) {
         Runtime.check();
         const r = this.scenes.detect(false);
-        if (r.scene === SCENE.BATTLE) return true;
-        if (r.scene === SCENE.BATTLE_END || r.scene === SCENE.HOME) return false;
-        let d = 1;
-        try { d = this.vision.frameDiff(region); } catch (e) { /* 忽略 */ }
-        if (d >= thr) moving++;
-        await Utils.sleep(700);
+        if (r.scene === SCENE.DAILY) return 'room';
+        if (r.scene === SCENE.BATTLE) return 'battle';
+        if (r.scene === SCENE.HOME) return 'home';
+        await Utils.sleep(600);
       }
-      return moving >= 3;
+      return 'timeout';
     }
   }
 
@@ -3006,12 +3030,14 @@
     { kind: 'drag', title: '主场景拖到最左（第二次）', detail: '横向匀速拖动 x 1051→171，y≈340', coord: null, color: '88,166,255' },
     { kind: 'tap', title: '打开小队突袭', detail: '点「小队突袭」入口 (793,253)', coord: [793, 253], color: '88,166,255' },
   ];
-  // 每场通用流程：挑战 → （弹窗时）继续出战 → 战斗 → 关结算。
-  // 「是否消耗100金币确认勾选」弹窗与旧「金币多倍弹窗」同一探针区域（米白 240,238,213 std≈2），
-  // 勾选「本周不再提示」后本周内不再弹 → 探针确认出现才点，没弹直接开战。
+  // 每场通用流程：挑战 → （弹窗时）勾选本周不再提示 + 继续出战 → 战斗 → 关结算。
+  // 「是否消耗100金币确认勾选」弹窗与旧「金币多倍弹窗」同一探针区域（米白 240,238,213 std≈2）。
+  // 勾选框 (575,485)：弹窗只在未勾选时出现（勾过「本周不再提示」本周内不再弹），
+  // 所以弹窗出现时勾选框必然是空的 → 点它永远安全，不会把已勾的勾掉（2026-09-16 用户确认按录制来）。
   const SQUAD_ROUND = [
     { kind: 'tap', title: '挑战', detail: '点右下「挑战」(1158,615)', coord: [1158, 615], color: '126,231,135' },
-    { kind: 'tap', title: '继续出战', detail: '金币确认弹窗 → 点「继续出战」(529,412)（探针确认出现才点；不再勾选，避免把已勾的「本周不再提示」点掉）', coord: [529, 412], color: '210,153,34' },
+    { kind: 'tap', title: '勾选本周不再提示', detail: '金币确认弹窗 → 点勾选框 (575,485)（弹窗出现时必然未勾，点了就勾上）', coord: [575, 485], color: '126,231,135' },
+    { kind: 'tap', title: '继续出战', detail: '金币确认弹窗 → 点「继续出战」(529,412)（探针确认出现才点）', coord: [529, 412], color: '210,153,34' },
     { kind: 'check', title: '打完并关结算', detail: 'fight(noHome) 等战斗结束（squadVictory 胜利大字探针）→ 点 (1041,166) 关结算，留在小队突袭页', coord: null, color: '248,81,73' },
   ];
 
@@ -3763,19 +3789,23 @@
           await ctx.tap([1158, 615], null, '挑战');
           await Utils.sleep(2000);   // 录制间隔 ~2.4s：金币确认弹窗（若弹）
 
-          // 「是否消耗100金币确认勾选」弹窗：与旧 squadGoldMulti 同一探针区域（米白 240,238,213 std≈2），
-          // 勾选「本周不再提示」后本周内不再弹 → 探针确认出现才点，最多连处理 3 层。
+          // 「是否消耗100金币确认勾选」弹窗：与旧 squadGoldMulti 同一探针区域（米白 240,238,213 std≈2）。
+          // 弹窗只在未勾选时出现 → 出现时勾选框 (575,485) 必然是空的，先勾上再点「继续出战」；
+          // 勾过「本周不再提示」后本周内不再弹 → 探针确认出现才点，最多连处理 3 层。
           for (let i = 0; i < 3; i++) {
             let hit = false;
             try {
               const m = ctx.vision.match(PROBES.squadGoldMulti);
               hit = !!(m && m.ok);
-              Utils.log('info', `⚔️ 金币确认弹窗：${hit ? '出现 → 继续出战' : '未出现 → 直接开战'}（期望(240,238,213) 实际(${(m && m.avg.r) | 0},${(m && m.avg.g) | 0},${(m && m.avg.b) | 0}) d=${m && m.dist}/${m && m.tol} std=${m && m.std}）`);
+              Utils.log('info', `⚔️ 金币确认弹窗：${hit ? '出现 → 勾选不再提示 + 继续出战' : '未出现 → 直接开战'}（期望(240,238,213) 实际(${(m && m.avg.r) | 0},${(m && m.avg.g) | 0},${(m && m.avg.b) | 0}) d=${m && m.dist}/${m && m.tol} std=${m && m.std}）`);
             } catch (e) {
               hit = weekCount === 0;   // 视觉不可用：本周第一场按「会弹」兜底
               Utils.log('warn', '⚔️ 金币确认弹窗识别失败，按「本周第一场」规则兜底');
             }
             if (!hit) break;
+            ctx.step('勾选本周不再提示'); ctx.stepResult(true);
+            await ctx.tap([575, 485], null, '勾选本周不再提示');
+            await Utils.sleep(500);
             ctx.step('继续出战'); ctx.stepResult(true);
             await ctx.tap([529, 412], null, '继续出战');
             await Utils.sleep(2000);
@@ -3930,8 +3960,9 @@
         { kind: 'tap', title: '打开角斗场', detail: '点「忍术对战」入口 (974,357)', coord: [974, 357], color: '88,166,255' },
         { kind: 'tap', title: '选对手/挑战', detail: '点 (315,637)；未自动续局时才重复这一步', coord: [315, 637], color: '126,231,135' },
         { kind: 'tap', title: '开始对战', detail: '点 (1165,629)', coord: [1165, 629], color: '210,153,34' },
-        { kind: 'check', title: '打完一局（识别「胜负已分」）', detail: '按住普攻 + 5s 轮询技能；识别到金色横幅 / 黑屏序列 = 一局结束', coord: null, color: '248,81,73' },
-        { kind: 'check', title: '续下一局（不回主界面）', detail: '自动续局则继续；否则重复点选对手→开始对战', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '打完一局（识别「胜负已分」）', detail: '按住普攻 + 5s 轮询技能；识别到金色横幅 / 黑屏序列 = 本局打完', coord: null, color: '248,81,73' },
+        { kind: 'check', title: '等结算过场走完（房间页）', detail: '0.5.65：等 SCENE.DAILY 房间页出现才算这一把彻底结束（约 9s 过场）', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '续下一局（不回主界面）', detail: '房间页 → 点选对手→开始对战；已自动续局则直接进下一轮', coord: null, color: '188,140,255' },
         { kind: 'check', title: '打满后清结算回主界面', detail: '走完 rounds 局后 clearSettlement + goHome', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
@@ -3951,14 +3982,26 @@
             await Utils.sleep(3000);   // 匹配/准备动画
             await ctx.tap([1165, 629], null, '开始对战');
           }
+          const t0 = Date.now();
           await ctx.fight({ noHome: true });        // 识别到「胜负已分」即返回（不回主界面）
-          Utils.log('info', `⚔️ 角斗场 第 ${round}/${rounds} 局完成`);
+          Utils.log('info', `⚔️ 角斗场 第 ${round}/${rounds} 局打完（本局耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
           if (round >= rounds) break;
-          // 续下一局：实测黑屏后会自动开打，先等一会儿看画面是否已经在战斗
-          const auto = await ctx.battle.detectNextRound(9000);
-          needEntry = !auto;
-          Utils.log('info', auto ? '    ↻ 已自动进入下一局，继续按住普攻'
-                                 : '    ↻ 未自动续局 → 重复点「选对手 / 开始对战」');
+
+          // 0.5.65：等「结算过场走完 → 房间页」，再决定下一局怎么开（判据见 waitRoomPage）。
+          // 房间页 = 手动点「选对手 → 开始对战」；已自动续局 = 什么都不点，直接进下一轮 fight。
+          const where = await ctx.battle.waitRoomPage(16000);
+          if (where === 'room') {
+            needEntry = true;
+            Utils.log('info', '    ↻ 已回到房间页 → 点「选对手 / 开始对战」开下一局（不回主界面）');
+          } else if (where === 'battle') {
+            needEntry = false;
+            Utils.log('info', '    ↻ 游戏已自动开下一局，继续按住普攻');
+          } else {
+            // timeout / home：宁可多点一次也不卡住 —— 这两点落在房间页是无害的按钮位，
+            // 真在战斗中则打在摇杆左侧空白处（避开普攻位 k=1137,589，避免误触「匹配」）。
+            needEntry = true;
+            Utils.log('warn', `    ↻ ${where === 'home' ? '意外回到主界面' : '等待房间页超时'} → 兜底点一次「选对手 / 开始对战」`);
+          }
         }
         await ctx.battle.clearSettlement();
         await ctx.home();
