@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.5.62
+// @version      0.5.63
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.5.62'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.5.63'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1470,6 +1470,21 @@
     // 2026-09-12 两次校准录制差分实测：有弹窗 [400,300,480,340] avg(240,238,213)/std≈2（米白弹窗面板）；
     // 无弹窗（第二次直接进）同区 avg(120,97,42)/std≈43（深棕队伍页），色距 ≈246 → tol 25 + maxStd 12 双条件极稳。
     squadGoldMulti:{ area: [400, 300, 480, 340],   color: { r: 240, g: 238, b: 213 }, tol: 25, maxStd: 12, label: '金币多倍弹窗', verified: true },
+    // 0.5.63 新增（2026-09-16 用户录制「小队突袭.json」实测）：
+    //   小队突袭结算页是全屏「胜利」金橙大字 + 奖励图标墙（背景水墨黑），与角斗场横幅完全不同，
+    //   旧 victoryBanner [170,180,400,420] 打不到 → 小队突袭战斗结束只能靠「画面静止」或超时兜底。
+    //   取「胜利」二字笔画密集区 48x48 @ (500,140)：结算帧 (218,137,15)/std32；
+    //   战斗帧 (210,204,200) d=260、BOSS 页 (84,83,78) d=251 → tol 55 分离充足。
+    //   同归 BATTLE_END 计局（见 SCENE_RULES），waitForEnd 的「连续 2 拍 / 黑屏序列」落判不变。
+    squadVictory:{ area: [500, 140, 548, 188],     color: { r: 218, g: 137, b: 15 },  tol: 55, label: '小队突袭胜利大字', verified: true, note: '0.5.63 新增：小队突袭结算页「胜利」大字主体；失败局未录制，仍由静止/超时兜底' },
+    // 0.5.63 新增（2026-09-16 用户录制「组织祈福2.json」实测）：
+    //   「今日次数已用完」提示弹窗，取弹窗左下纯底色区 [400,300,480,340]：
+    //   有弹窗 (187,175,149)/std0.8；无弹窗（祈福页供桌暗区）(37,21,16) d=437、主界面 (154,202,150) d=61 → tol 20 稳。
+    orgUsedUp:{    area: [400, 300, 480, 340],     color: { r: 187, g: 175, b: 149 }, tol: 20, maxStd: 12, label: '祈福次数用完弹窗', verified: true },
+    // 「昨日祈福奖励」弹窗标题条（金色字+米黄底）：有弹窗 (211,205,169)；
+    // 无弹窗（组织祈福页暗背景）(24,16,21) d=524、主界面 (133,212,202) d=141 → tol 40。
+    // 领取后弹窗不关（按钮变灰），探针仍命中 → 可用于「弹窗还开着就继续点领取」的循环判定。
+    orgYesterday:{ area: [600, 110, 860, 170],     color: { r: 211, g: 205, b: 169 }, tol: 40, label: '昨日祈福奖励弹窗', verified: true },
     // 招募结果界面双条件（2026-09-12 用户截图实测）：金色「确定」按钮 (360,555) + 中心暗背景 (400,300)
     // ⚠ 0.5.54 起**已停用**（用户口径：取消「免费招募」里的「识别结果界面」那一步）——
     //   真机录制（免费招募.json s4 帧）确认：结果界面的「确定」就在 (429,571)，
@@ -1494,7 +1509,7 @@
   };
 
   const SCENE_RULES = [
-    { scene: SCENE.BATTLE_END, probes: ['victoryBanner', 'defeatBanner', 'settleConfirm'], min: 1 },
+    { scene: SCENE.BATTLE_END, probes: ['victoryBanner', 'defeatBanner', 'settleConfirm', 'squadVictory'], min: 1 },
     { scene: SCENE.BATTLE,     probes: ['battleStick', 'battleSkill'],     min: 2 },
     // HOME 必须先于 OTHER：主界面右上角的红色「活动」图标与二级页红✕位置几乎重合，
     // 动态红✕检测器在主界面也会命中 → 若 OTHER 先判，主界面会被当成"其它页"，
@@ -2984,24 +2999,20 @@
   // ⚠ 索引类 XPath（div[9]）会随页面结构变化而失效，仅作兜底；主路径仍按坐标 elementFromPoint 定位
   const SHARE_IMG_CLOSE_XPATH = '/html/body/div[9]/div/div[2]/div[1]/div[3]';
 
-  // 小队突袭步骤常量（预览 + 运行共用）：只有本周第一次（周一的第一次）走「首次·取消多倍」流程
+  // 小队突袭步骤常量（预览 + 运行共用）。0.5.63 全量按 2026-09-16 用户录制「小队突袭.json」重录：
+  // 界面已改版（BOSS 页「宇智波鼬 S」，右下按钮为「挑战」），旧「进入 (1173,617) → 金币多倍弹窗」流程废弃。
   const SQUAD_COMMON = [
-    { kind: 'drag', title: '主场景拖到最左（第一次）', detail: '横向匀速拖动 x 863→181，y=360', coord: null, color: '88,166,255' },
-    { kind: 'drag', title: '主场景拖到最左（第二次）', detail: '横向匀速拖动 x 877→231，y=360', coord: null, color: '88,166,255' },
-    { kind: 'tap', title: '打开小队突袭', detail: '点「小队突袭」入口 (779,285)', coord: [779, 285], color: '88,166,255' },
+    { kind: 'drag', title: '主场景拖到最左（第一次）', detail: '横向匀速拖动 x 1089→-22，y≈300（2026-09-16 录制实测）', coord: null, color: '88,166,255' },
+    { kind: 'drag', title: '主场景拖到最左（第二次）', detail: '横向匀速拖动 x 1051→171，y≈340', coord: null, color: '88,166,255' },
+    { kind: 'tap', title: '打开小队突袭', detail: '点「小队突袭」入口 (793,253)', coord: [793, 253], color: '88,166,255' },
   ];
-  // 首次流程：进入后弹「金币多倍」选项 → 取消 → 开始战斗 → 战斗确认
-  const SQUAD_FIRST = [
-    { kind: 'tap', title: '进入', detail: '点右下「进入」(1173,617)', coord: [1173, 617], color: '126,231,135' },
-    { kind: 'tap', title: '取消金币多倍', detail: '点「取消多倍」选项 (570,497)', coord: [570, 497], color: '248,81,73' },
-    { kind: 'tap', title: '开始战斗', detail: '点「开始战斗」(523,410)', coord: [523, 410], color: '210,153,34' },
-    { kind: 'tap', title: '战斗确认', detail: '点 (507,437)（校准间隔 9s 后）', coord: [507, 437], color: '210,153,34' },
-    { kind: 'check', title: '打完并结算', detail: 'fight() 等战斗结束 → 清结算 → 回主界面（超时 300s（含战斗））', coord: null, color: '248,81,73' },
-  ];
-  // 第二次流程：无多倍弹窗，直接进
-  const SQUAD_SECOND = [
-    { kind: 'tap', title: '进入', detail: '点右下「进入」(1160,620)（本周第二次起无多倍弹窗，直接进）', coord: [1160, 620], color: '126,231,135' },
-    { kind: 'check', title: '打完并结算', detail: 'fight() 等战斗结束 → 清结算 → 回主界面（超时 300s（含战斗））', coord: null, color: '248,81,73' },
+  // 每场通用流程：挑战 → （弹窗时）继续出战 → 战斗 → 关结算。
+  // 「是否消耗100金币确认勾选」弹窗与旧「金币多倍弹窗」同一探针区域（米白 240,238,213 std≈2），
+  // 勾选「本周不再提示」后本周内不再弹 → 探针确认出现才点，没弹直接开战。
+  const SQUAD_ROUND = [
+    { kind: 'tap', title: '挑战', detail: '点右下「挑战」(1158,615)', coord: [1158, 615], color: '126,231,135' },
+    { kind: 'tap', title: '继续出战', detail: '金币确认弹窗 → 点「继续出战」(529,412)（探针确认出现才点；不再勾选，避免把已勾的「本周不再提示」点掉）', coord: [529, 412], color: '210,153,34' },
+    { kind: 'check', title: '打完并关结算', detail: 'fight(noHome) 等战斗结束（squadVictory 胜利大字探针）→ 点 (1041,166) 关结算，留在小队突袭页', coord: null, color: '248,81,73' },
   ];
 
 
@@ -3589,26 +3600,84 @@
     {
       key: 'orgBlessing', name: '组织祈福', category: 'daily',
       /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应）
-       *  2026-09-11 桌面校准 JSON 实测坐标：先两次拖动把主场景拉到最右，再进组织祈福 */
+       *  2026-09-16 全量按用户录制「组织祈福2.json」重写：
+       *  ① 祈福页改版：焚香祈福 (326,607)（6000 金币）+ 纳贡祈福 (582,579)（120 贡献），
+       *     次数用完弹「今日次数已用完」→ 确定 (630,452)（orgUsedUp 探针确认才点）；
+       *  ② **新增昨日遗留奖励领取**：左上「昨日奖励」礼包 (445,185)（带红点）→
+       *     「昨日祈福奖励」弹窗（orgYesterday 探针）→ 点「领取」(804,269)（点两次覆盖多条目，
+       *     领完按钮变灰再点无害）→ 点 (971,264) 关弹窗；
+       *  ③ 收尾 ctx.home()（录制到关弹窗为止，回主界面由 goHome 兜底）。 */
       steps: [
-        { kind: 'drag', title: '主场景拖到最右（第一次）', detail: '横向匀速拖动 x 191→1040，y=360（校准 y≈280，统一取中值）', coord: null, color: '88,166,255' },
-        { kind: 'drag', title: '主场景拖到最右（第二次）', detail: '横向匀速拖动 x 184→974，y=360', coord: null, color: '88,166,255' },
-        { kind: 'tap', title: '打开组织', detail: '点「组织」入口 (739,343)', coord: [739, 343], color: '88,166,255' },
-        { kind: 'tap', title: '切祈福页签', detail: '点「祈福」页签 (136,432)', coord: [136, 432], color: '88,166,255' },
-        { kind: 'tap', title: '祈福', detail: '点「祈福」按钮 (327,601)', coord: [327, 601], color: '126,231,135' },
-        { kind: 'tap', title: '确认 ×2', detail: '连点确认 (567,583)（校准两次同位置）', coord: [567, 583], color: '210,153,34' },
+        { kind: 'drag', title: '主场景拖到最右（第一次）', detail: '横向匀速拖动 x 152→951，y≈280（2026-09-16 录制实测）', coord: null, color: '88,166,255' },
+        { kind: 'drag', title: '主场景拖到最右（第二次）', detail: '横向匀速拖动 x 205→967，y≈300', coord: null, color: '88,166,255' },
+        { kind: 'tap', title: '打开组织', detail: '点「组织」入口 (723,361)', coord: [723, 361], color: '88,166,255' },
+        { kind: 'tap', title: '切祈福页签', detail: '点左侧「祠堂」(125,433)', coord: [125, 433], color: '88,166,255' },
+        { kind: 'tap', title: '焚香祈福', detail: '点「焚香祈福」(326,607)（6000 金币，每日免费档）', coord: [326, 607], color: '126,231,135' },
+        { kind: 'tap', title: '纳贡祈福', detail: '点「纳贡祈福」(582,579)（120 贡献；次数用完会弹提示）', coord: [582, 579], color: '126,231,135' },
+        { kind: 'tap', title: '次数用完→确定', detail: '弹「今日次数已用完」→ 点「确定」(630,452)（orgUsedUp 探针确认才点）', coord: [630, 452], color: '210,153,34' },
+        { kind: 'tap', title: '打开昨日奖励', detail: '点左上「昨日奖励」礼包 (445,185)（带红点）', coord: [445, 185], color: '126,231,135' },
+        { kind: 'tap', title: '领取昨日奖励', detail: '「昨日祈福奖励」弹窗 → 点「领取」(804,269)（orgYesterday 探针确认；点两次覆盖多条目）', coord: [804, 269], color: '126,231,135' },
+        { kind: 'tap', title: '关闭昨日奖励', detail: '点 (971,264) 关弹窗（录制实测）', coord: [971, 264], color: '210,153,34' },
         { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
-        await ctx.drag([191, 360, 1040, 360], null, null, null, 568, '主场景拖到最右');
-        await ctx.drag([184, 360, 974, 360], null, null, null, 595, '主场景拖到最右');
-        await ctx.go([739, 343], null, '打开组织');
-        await ctx.tap([136, 432], null, '切祈福页签');
-        await ctx.tap([327, 601], null, '祈福');
-        await Utils.sleep(1500);   // 校准间隔 3.3s：祈福动画
-        await ctx.tap([567, 583], null, '确认#1');
-        await ctx.tap([568, 584], null, '确认#2');
+
+        // 弹「今日次数已用完」就点确定；视觉不可用时兜底点一下（无弹窗落在供桌上，无害）
+        const dismissUsedUp = async (label) => {
+          let hit = false;
+          try {
+            const m = ctx.vision.match(PROBES.orgUsedUp);
+            hit = !!(m && m.ok);
+            Utils.log('info', `🏮 ${label}弹窗：${hit ? '出现 → 确定' : '未出现 → 跳过'}（期望(187,175,149) 实际(${(m && m.avg.r) | 0},${(m && m.avg.g) | 0},${(m && m.avg.b) | 0}) d=${m && m.dist}/${m && m.tol} std=${m && m.std}）`);
+          } catch (e) {
+            hit = true;
+            Utils.log('warn', '🏮 次数弹窗识别失败，兜底点一次确定');
+          }
+          if (hit) { ctx.step('次数用完→确定'); ctx.stepResult(true); await ctx.tap([630, 452], null, '确定'); await Utils.sleep(1200); }
+          else { ctx.step('无次数提示'); ctx.stepResult(true); }
+        };
+
+        await ctx.drag([152, 278, 951, 279], null, null, null, 591, '主场景拖到最右');
+        await ctx.drag([205, 290, 967, 303], null, null, null, 717, '主场景拖到最右');
+        await ctx.go([723, 361], null, '打开组织');
+        await Utils.sleep(1500);
+        await ctx.tap([125, 433], null, '切祈福页签');
+        await Utils.sleep(1800);
+
+        // ① 焚香祈福（每日免费档）→ 可能弹「次数已用完」
+        await ctx.tap([326, 607], null, '焚香祈福');
+        await Utils.sleep(1800);
+        await dismissUsedUp('焚香祈福');
+
+        // ② 纳贡祈福（120 贡献）→ 次数用完弹提示
+        await ctx.tap([582, 579], null, '纳贡祈福');
+        await Utils.sleep(1800);
+        await dismissUsedUp('纳贡祈福');
+
+        // ③ 昨日遗留奖励：左上礼包（带红点）→ 弹窗 → 领取（两次覆盖多条目）→ 关闭
+        await ctx.tap([445, 185], null, '打开昨日奖励');
+        await Utils.sleep(1800);
+        let opened = false;
+        try {
+          const m = ctx.vision.match(PROBES.orgYesterday);
+          opened = !!(m && m.ok);
+          Utils.log('info', `🏮 昨日奖励弹窗：${opened ? '出现 → 领取' : '未出现（可能已领取）→ 跳过'}`);
+        } catch (e) {
+          opened = true;   // 视觉不可用按有弹窗处理：领取/关闭坐标点在弹窗外也无害
+          Utils.log('warn', '🏮 昨日奖励弹窗识别失败，按「有弹窗」兜底');
+        }
+        if (opened) {
+          ctx.step('领取昨日奖励'); ctx.stepResult(true);
+          await ctx.tap([804, 269], null, '领取#1');
+          await Utils.sleep(1500);
+          await ctx.tap([804, 269], null, '领取#2');
+          await Utils.sleep(1200);
+          await ctx.tap([971, 264], null, '关闭昨日奖励');
+        } else {
+          ctx.step('无昨日奖励弹窗'); ctx.stepResult(true);
+        }
+
         await ctx.home();
 
       }
@@ -3640,18 +3709,16 @@
     {
       key: 'squadRaid', name: '小队突袭', category: 'daily', timeout: 900000,
       /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应）
-       *  2026-09-11 桌面校准 JSON 实测；2026-09-12 改为**识别驱动 + 每天两次**：
-       *  ① 每天默认打 squadRaidRounds（默认 2）次，每轮独立展开一次流程图；
-       *  ② 进队伍页后先点「进入」，再识别「金币多倍」弹窗——出现才点取消 + 开始战斗 + 战斗确认，
-       *     没出现就跳过这三步直接进战斗（视觉不可用时退回「本周第一次」规则兜底）
-       *  2026-09-13 修复「打完第 1 场自动又开一场」：
-       *  该玩法战斗结束会**自动结算并自动退回房间界面**，而战斗辅助的普攻位 k(1137,589) 恰好
-       *  压在房间界面右下角的大字「匹配」上 → 结算瞬间的连点会把「匹配」点开、白打一场，
-       *  而主流程还停在上一轮里。现在三道防护：① 战斗识别节流 0.7s→0.3s；② 画面一静止
-       *  辅助立刻停手（见 BattleFlow）；③ 每轮结束后 waitQuiet 等画面彻底静止，把"一旦误触
-       *  又开的那一场"吸收掉；并且后续轮次若已退回房间界面，直接点「匹配」开下一场，
-       *  不再绕回主界面重进。 */
-      steps: SQUAD_COMMON.concat(SQUAD_FIRST),
+       *  2026-09-16 全量按用户录制「小队突袭.json」重写（界面已改版：BOSS 页「宇智波鼬 S」）：
+       *  ① 每天默认打 squadRaidRounds（默认 2）场，**连续运行不回主界面**：
+       *     进页面只走一次（拖×2 → 入口），之后每场「挑战 (1158,615) → 金币确认弹窗（探针确认
+       *     才点「继续出战」(529,412)）→ fight(noHome) → 点 (1041,166) 关结算 → 直接下一场」；
+       *  ② 结束判定更准：新增 squadVictory 探针（结算页「胜利」金橙大字），同归 BATTLE_END，
+       *     waitForEnd 的「连续 2 拍 / 黑屏序列」落判直接适用，不再只靠画面静止/超时兜底；
+       *  ③ 全部打完 → 右上红✕ (1215,32) 退回主界面（录制实测有效关闭点）。
+       *  遗留防护（0.5.13 系）：战斗识别节流 0.3s + 画面静止辅助立即停手，防止普攻位 k(1137,589)
+       *  在结算瞬间连点误触「挑战」又开一场 —— 现在 k 与「挑战」(1158,615) 依旧邻近，防护仍必要。 */
+      steps: SQUAD_COMMON.concat(SQUAD_ROUND),
       async run(ctx) {
         const rounds = Math.max(1, ctx.cfg.num('squadRaidRounds') || 2);
 
@@ -3660,93 +3727,87 @@
         const monday = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
         const weekKey = monday.getFullYear() + '-' + (monday.getMonth() + 1) + '-' + monday.getDate();
 
+        const enterFromHome = async () => {
+          await ctx.drag([1089, 296, -22, 359], null, null, null, 506, '主场景拖到最左');
+          await ctx.drag([1051, 326, 171, 356], null, null, null, 595, '主场景拖到最左');
+          await ctx.go([793, 253], null, '打开小队突袭');
+          await Utils.sleep(3000);   // BOSS 页加载（录制间隔 ~3s）
+        };
+
         for (let round = 1; round <= rounds; round++) {
           const rec = Store.get('na_squadRaid', { week: '', count: 0 });
           const weekCount = (rec.week === weekKey) ? (rec.count || 0) : 0;
 
-          // 每轮独立展开流程图（按「出现多倍弹窗」的流程展示；未出现时把那几步标记为跳过）
-          await ctx.flow(`小队突袭 第 ${round}/${rounds} 次`, SQUAD_COMMON.concat(SQUAD_FIRST));
-
-          // ——— 决定本轮的「进入方式」 ———
-          // 第 1 轮：从主界面完整进入（拖屏 → 打开 → 进入）。
-          // 第 2 轮起：上一场打完会自动退回「小队突袭房间」界面，此时**直接点右下「匹配」**开下一场
-          //   最省事；只有确实已回到主界面时才退回完整进入流程。
-          let atHome = round === 1;
-          if (round > 1) {
-            // 先等画面彻底静止：既确认上一场真的结束，也把「辅助误触匹配又开的一场」吸收掉。
+          // 第 1 场从主界面完整进入；后续场**留在小队突袭页**直接挑战（用户要求不回桌面）。
+          // 只有意外回到主界面（如结算被辅助提前点掉又弹回）才走完整进入兜底。
+          if (round === 1) {
+            await ctx.flow(`小队突袭 第 ${round}/${rounds} 场`, SQUAD_COMMON.concat(SQUAD_ROUND));
+            await enterFromHome();
+          } else {
             const churn = await ctx.waitQuiet(1500, 3);
             if (churn > 0) {
-              Utils.log('warn', `⚠ 本轮开始前画面仍在变化（${churn} 拍）——多为辅助 k 误触「匹配」又开了一场，已等它打完`);
+              Utils.log('warn', `⚠ 本场开始前画面仍在变化（${churn} 拍）——多为辅助 k 误触「挑战」又开了一场，已等它打完`);
             }
-            atHome = ctx.scenes.detect(false).scene === SCENE.HOME;
-            Utils.log('info', atHome
-              ? '⚔️ 已回到主界面 → 走完整进入流程'
-              : '⚔️ 仍在小队突袭内 → 直接点「匹配」开下一场');
+            const atHome = ctx.scenes.detect(false).scene === SCENE.HOME;
+            if (atHome) {
+              Utils.log('info', '⚔️ 已回到主界面 → 走完整进入流程');
+              await ctx.flow(`小队突袭 第 ${round}/${rounds} 场`, SQUAD_COMMON.concat(SQUAD_ROUND));
+              await enterFromHome();
+            } else {
+              Utils.log('info', '⚔️ 仍在小队突袭页 → 直接挑战下一场（不回主界面）');
+              await ctx.flow(`小队突袭 第 ${round}/${rounds} 场`, SQUAD_ROUND);
+            }
           }
 
-          if (atHome) {
-            await ctx.drag([863, 360, 181, 360], null, null, null, 406, '主场景拖到最左');
-            await ctx.drag([877, 360, 231, 360], null, null, null, 462, '主场景拖到最左');
-            await ctx.go([779, 285], null, '打开小队突袭');
-            await Utils.sleep(3000);   // 校准间隔 8s：队伍页加载（go 后补足）
-            await ctx.tap([1173, 617], null, '进入');
-            await Utils.sleep(1500);   // 校准间隔 3s：多倍选项弹窗出现
+          // ——— 挑战 → 弹窗处理 ———
+          await ctx.tap([1158, 615], null, '挑战');
+          await Utils.sleep(2000);   // 录制间隔 ~2.4s：金币确认弹窗（若弹）
 
-            // 识别「金币多倍」弹窗：出现 → 取消 + 开始战斗 + 战斗确认；未出现 → 跳过
-            let hasMulti = weekCount === 0;   // 视觉不可用时退回「本周第一次」规则
+          // 「是否消耗100金币确认勾选」弹窗：与旧 squadGoldMulti 同一探针区域（米白 240,238,213 std≈2），
+          // 勾选「本周不再提示」后本周内不再弹 → 探针确认出现才点，最多连处理 3 层。
+          for (let i = 0; i < 3; i++) {
+            let hit = false;
             try {
               const m = ctx.vision.match(PROBES.squadGoldMulti);
-              hasMulti = !!(m && m.ok);
-              Utils.log('info', `⚔️ 金币多倍弹窗：${hasMulti ? '出现 → 取消' : '未出现 → 跳过'}` +
-                `（期望(240,238,213) 实际(${(m && m.avg.r) | 0},${(m && m.avg.g) | 0},${(m && m.avg.b) | 0}) d=${m && m.dist}/${m && m.tol} std=${m && m.std}）`);
+              hit = !!(m && m.ok);
+              Utils.log('info', `⚔️ 金币确认弹窗：${hit ? '出现 → 继续出战' : '未出现 → 直接开战'}（期望(240,238,213) 实际(${(m && m.avg.r) | 0},${(m && m.avg.g) | 0},${(m && m.avg.b) | 0}) d=${m && m.dist}/${m && m.tol} std=${m && m.std}）`);
             } catch (e) {
-              Utils.log('warn', '⚔️ 多倍弹窗识别失败，退回「本周第一次」规则：' + (hasMulti ? '取消' : '跳过'));
+              hit = weekCount === 0;   // 视觉不可用：本周第一场按「会弹」兜底
+              Utils.log('warn', '⚔️ 金币确认弹窗识别失败，按「本周第一场」规则兜底');
             }
-            ctx.step('识别金币多倍弹窗');
-            ctx.stepResult(true);
-
-            if (hasMulti) {
-              await ctx.tap([570, 497], null, '取消金币多倍');
-              await Utils.sleep(2000);   // 校准间隔 4s
-              await ctx.tap([523, 410], null, '开始战斗');
-              await Utils.sleep(5000);   // 校准间隔 9s：战斗加载
-              await ctx.tap([507, 437], null, '战斗确认');
-            } else {
-              Utils.log('info', '⚔️ 未出现金币多倍弹窗 → 跳过「取消多倍/开始战斗/战斗确认」，直接进战斗');
-              ctx.step('跳过：无多倍弹窗'); ctx.stepResult(true);
-              ctx.step('跳过：无多倍弹窗'); ctx.stepResult(true);
-              ctx.step('跳过：无多倍弹窗'); ctx.stepResult(true);
-            }
-          } else {
-            // 已在房间界面 → 直接点右下「匹配」。即使此刻其实还在战斗中（辅助误触提前开了一场），
-            // 这一点也只是打在普攻位上，无害。
-            ctx.step('匹配（开始下一场）'); ctx.stepResult(true);
-            await ctx.tap([1160, 620], null, '匹配（开始下一场）');
-            await Utils.sleep(3000);
+            if (!hit) break;
+            ctx.step('继续出战'); ctx.stepResult(true);
+            await ctx.tap([529, 412], null, '继续出战');
+            await Utils.sleep(2000);
           }
 
-          await ctx.fight();
+          // ——— 战斗（不自动回主界面，由本任务决定连续下一场还是退出）———
+          const reason = await ctx.fight({ noHome: true });
 
-          // 本轮收尾：等画面彻底静止再进入下一轮。若画面又动起来，说明辅助 k 误触「匹配」
-          // 多开了一场 —— 这里把它等完，保证「主流程轮次」和「实际场次」不脱节。
-          const extra = await ctx.waitQuiet(1500, 3);
-          if (extra > 0) {
-            Utils.log('warn', `⚠ 本轮结束后画面仍在变化（${extra} 拍）——辅助误触「匹配」多开了一场，已等其结束`);
+          // ——— 关结算：结算页「点击任意位置关闭界面」，录制实测点 (1041,166)。
+          // 超时（还在战斗中）时不点，避免打到战斗画面右上 HUD；
+          // 若结算已被辅助提前点掉（reason='stable'），这一点落在 BOSS 页立绘上，无害。
+          if (reason !== 'timeout') {
+            ctx.step('关闭战斗结算'); ctx.stepResult(true);
+            await ctx.tap([1041, 166], null, '关闭战斗结算');
+            await Utils.sleep(2000);
+          } else {
+            Utils.log('warn', '⚔️ 战斗超时，跳过结算关闭');
           }
 
           Store.set('na_squadRaid', { week: weekKey, count: weekCount + 1 });
-          Utils.log('info', `⚔️ 小队突袭 第 ${round}/${rounds} 次完成`);
+          Utils.log('info', `⚔️ 小队突袭 第 ${round}/${rounds} 场完成（${reason}）`);
         }
 
-        // 全部打完 → 收尾回主界面（房间界面左下「返回」→ 主界面）
+        // 全部打完 → 右上红✕ 退回主界面（录制实测 (1215,32)；无弹窗时该点在主界面左上空白，无害）
         const sc = ctx.scenes.detect(false).scene;
         if (sc !== SCENE.HOME) {
-          ctx.step('返回主界面'); ctx.stepResult(true);
-          await ctx.tap([65, 685], null, '返回主界面');
-          await Utils.sleep(1000);
+          ctx.step('退出小队突袭'); ctx.stepResult(true);
+          await ctx.tap([1215, 32], null, '退出小队突袭（红✕）');
+          await Utils.sleep(1500);
           await ctx.home();
         }
-        Utils.log('info', `⚔️ 小队突袭全部完成（${rounds} 次）`);
+        Utils.log('info', `⚔️ 小队突袭全部完成（${rounds} 场）`);
       },
     },
 
