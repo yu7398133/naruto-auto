@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.5.65
+// @version      0.5.81
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.5.65'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.5.81'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -182,8 +182,9 @@
   // 任何来源（默认值 / 已存配置 / 面板输入）低于它都会被抬到它。
   const MIN_STEP_DELAY = 1000;
   // 2026-09-13 用户口径（补充）：除战斗环节外，**任何操作之间**的延时不低于 0.5s。
+  // 2026-09-19 用户口径（收紧）：**少于 1s 的间隔一律抬到 1s**（"加载有延迟时太快会点错位置"）。
   // 作为所有 delay.* 配置项的通用硬下限；战斗模块不走 cfg.wait（用 A.kGap 等自己的节奏），天然豁免。
-  const MIN_OP_DELAY = 500;
+  const MIN_OP_DELAY = 1000;
 
   const DEFAULT_CONFIG = {
     version: VERSION,
@@ -196,8 +197,8 @@
       // ⚠ 老配置里存的是 350/700，光改默认值不生效（_merge 以已存值为准）→ 见 _load 里的迁移。
       click:    { min: 1000, max: 1500 },
       pageLoad: { min: 1800, max: 3200 },
-      short:    { min: 600,  max: 1100 },
-      popup:    { min: 700,  max: 1400 },
+      short:    { min: 1000, max: 1100 },
+      popup:    { min: 1000, max: 1400 },
     },
 
     retry: { maxAttempts: 2, interval: 2500 },
@@ -239,7 +240,7 @@
       blindBack: false,     // 场景识别不出时，改用「盲按返回」序列（ESC + 多个候选返回位）
       useEsc: true,         // 盲按时先发 ESC
       // ——— 0.5.52 用户报「回主界面来回跳」，加两道延时 ———
-      homeConfirmGap: 900,  // 判「不是主界面」前的二次确认间隔(ms)：躲开页面切换过渡帧
+      homeConfirmGap: 1000, // 判「不是主界面」前的二次确认间隔(ms)：躲开页面切换过渡帧（0.5.76 起 ≥1s）
       homeSettleMs: 1500,   // 每按一次「返回」后等动画走完(ms)：防叠加多按
       backSpots: [          // 盲按返回候选位，按序轮转
         [1146, 69], [66, 677], [1229, 36], [40, 40], [66, 40], [640, 690],
@@ -280,7 +281,7 @@
     taskSwitches: {
       // 每日收获
       collectGold: true, collectMail: true, collectSign: true,
-      shareDaily: true, collectIntel: true,
+      shareDaily: true,
       collectRank: true, collectActive: true,
       privilegeShop: true,
       recruit: true,
@@ -288,7 +289,6 @@
       sendStamina: true,   // 2026-09-13 从「每日收获」移入日常任务，且排日常首位
       squadRaid: true, squadAssist: true, abundanceRoom: true, orgBlessing: true,
       survivalTrial: true, equipSweep: true, missionHall: true,
-      shopBuy: true,
       ichiraku: true,          // 2026-09-12 补齐：这两个任务之前漏了开关，无法单独启用
       scoreMatchClaim: true,   // 2026-09-13 新增「积分赛段位领取」（进入即自动领取）
       // 战斗（0.5.56 从「日常任务」拆出的独立分类；面板多一个「🥊 战斗」按钮，可单独一键开跑）
@@ -333,12 +333,23 @@
         }
       } catch (e) { /* 迁移失败不影响加载 */ }
 
+      // 0.5.76 迁移（用户口径「少于 1s 的都增加到 1s」）：delay.short / delay.popup 的下限也抬到 1s。
+      // 同样因为 _merge 以已存值为准，光改 DEFAULT_CONFIG 对老配置不生效。
+      try {
+        for (const key of ['short', 'popup']) {
+          const r = merged.delay && merged.delay[key];
+          if (!r) continue;
+          if (!(r.min >= MIN_OP_DELAY)) r.min = MIN_OP_DELAY;
+          if (!(r.max >= r.min)) r.max = r.min;
+        }
+      } catch (e) { /* 迁移失败不影响加载 */ }
+
       // 0.5.52 迁移：回主界面加了两道延时（homeConfirmGap/homeSettleMs），单次 goHome 变慢，
       // 老配置的 homeTimeout=20000 会不够按满 maxBack 次 → 统一抬到 30000。
       try {
         const nv = merged.nav || (merged.nav = {});
         if (!(nv.homeTimeout >= 30000)) nv.homeTimeout = 30000;
-        if (!(nv.homeConfirmGap >= 300)) nv.homeConfirmGap = 900;
+        if (!(nv.homeConfirmGap >= 1000)) nv.homeConfirmGap = 1000;
         if (!(nv.homeSettleMs >= 500)) nv.homeSettleMs = 1500;
       } catch (e) { /* 迁移失败不影响加载 */ }
 
@@ -409,12 +420,20 @@
       return category === 'weekly' ? Utils.weekKey(h) : Utils.dayKey(h);
     }
 
+    /** 该任务是否纳入「当天/当周已做过」记录。
+     *  0.5.74 用户口径：**战斗组（battle）一律不记录** —— 角斗场忍术对战、秘境挑战、
+     *  任务集会所都是长期挂机任务，用户点了就是要执行，不该因为「今天做过了」被跳过。
+     *  （代价：这几项不再去重，重复点「开始/战斗」就会重复跑 —— 用户明确接受） */
+    tracked(task) { return !!task && task.category !== 'battle'; }
+
     isDone(task) {
+      if (!this.tracked(task)) return false;   // 战斗组：永不判「已完成」
       const rec = this.data[task.key];
       return !!rec && rec.status === 'success' && rec.period === this._period(task.category);
     }
 
     mark(task, status, extra) {
+      if (!this.tracked(task)) return;         // 战斗组不写周期记录（运行 history 照旧）
       this.data[task.key] = Object.assign(
         { period: this._period(task.category), status, at: Date.now() },
         extra || {}
@@ -632,13 +651,6 @@
      *   4) 老 SDK 的 sendMouseEvent / sendRawEvent / sendTouchEvent（多格式）
      */
     _emit(kind, p) {
-      // —— 0) 干跑模式：只记录，不真实注入（配合标记圈观察脚本意图）
-      if (DryRun.on) {
-        DryRun.record(kind, p);
-        this.lastSend = { sdk: 'dryrun', method: kind, at: p, at2: Date.now() };
-        return p;
-      }
-
       // —— 1) 原生 DOM 派发（主通道，真机验证有效）——
       if (Vision.video) return this._domDispatch(kind, p);
 
@@ -740,7 +752,7 @@
     _down(x, y, button) {
       Runtime.check();
       const p = this._map(x, y);
-      p.logical = { x, y };   // 供干跑记录/标记使用
+      p.logical = { x, y };   // 供标记/追踪使用
       return this._emit('down', p);
     }
 
@@ -772,12 +784,6 @@
      *  · lastSend.tried 记录每个通道的成败，供面板「⌨ 键盘自检」诊断。
      */
     key(key, mods, hold, fanout) {
-      // 干跑模式：只记录，不真实注入
-      if (DryRun.on) {
-        DryRun.record('key', { key, mods: mods || {}, hold });
-        this.lastSend = { sdk: 'dryrun', method: 'key', key, at: Date.now() };
-        return true;
-      }
       const m = mods || {};
       const ms = hold == null ? 60 : hold;
       const kc = Utils.keyCode(key);
@@ -848,6 +854,8 @@
         sdk: this.name || (sent ? 'dom' : 'none'), method: fanout ? 'fanout' : 'first-ok',
         key, code, keyCode: kc, mods: m, hold: ms, tried, at: Date.now(),
       };
+      // 自动运行追踪：所有按键都从这里漏斗过，统一在此记录（避免经 GameOperator.key 与直连 sdk.key 重复/漏录）
+      AutoTrace.record('key', { key: key, hold: ms });
       if (!sent) Utils.log('warn', `⌨ 发键失败（无任何通道可用）：${key}`);
       return sent;
     }
@@ -1516,7 +1524,10 @@
   };
 
   const SCENE_RULES = [
-    { scene: SCENE.BATTLE_END, probes: ['victoryBanner', 'defeatBanner', 'settleConfirm', 'squadVictory'], min: 1 },
+    // 0.5.70：settleConfirm 从 BATTLE_END 移除。该探针对战斗地面/技能区误报率极高，
+    // 会把正常战斗帧误判为结算 → waitForEnd 提前返回、arena 误点「开始对战」。
+    // settleConfirm 仍作为独立命中在 clearSettlement 里使用，不影响实际结算按钮点击。
+    { scene: SCENE.BATTLE_END, probes: ['victoryBanner', 'defeatBanner', 'squadVictory'], min: 1 },
     { scene: SCENE.BATTLE,     probes: ['battleStick', 'battleSkill'],     min: 2 },
     // HOME 必须先于 OTHER：主界面右上角的红色「活动」图标与二级页红✕位置几乎重合，
     // 动态红✕检测器在主界面也会命中 → 若 OTHER 先判，主界面会被当成"其它页"，
@@ -1683,7 +1694,6 @@
       shareBtn:      { x: 640,  y: 350 },
       shareConfirm:  { x: 640,  y: 500 },
       staminaSend:   { x: 640,  y: 400 },
-      intelBtn:      { x: 300,  y: 300 },
       // 排行榜点赞（2026-09-10T18-32 面板校准实测：先两次横向拖动把主场景拉到最左，再开排行榜点赞）
       // 拖动只需 x 起止，y 固定取画面中间 360（BASE_H=720 中值）；swipe 本身匀速线性
       rankDrags:     [{ x1: 173, x2: 1589 }, { x1: 211, x2: 1196 }],
@@ -1705,9 +1715,6 @@
       missionEntry:      { x: 500,  y: 450 },
       missionDispatch:   { x: 640,  y: 500 },
       secretEntry:       { x: 700,  y: 450 },
-      shopItem1:         { x: 300,  y: 350 },
-      shopBuyBtn:        { x: 1000, y: 500 },
-      shopConfirm:       { x: 540,  y: 450 },
     },
 
     weekly: {
@@ -1866,58 +1873,198 @@
   };
 
   // ============================================================
-  //  DryRun — 干跑模式
-  //  开启后：所有输入注入被拦截（不真实点击/按键），但任务逻辑与
-  //  时序完整保留，点击位置以标记圈显示在画面上。
-  //  用途：让真人跟着脚本节奏手动操作，核对每一步判断是否合理。
+  //  AutoTrace — 自动运行追踪器
+  //  开启后：脚本每次真实点击 / 滑动 / 按键都会被记录，连同
+  //  「当前场景 + 命中探针 + 点击时画面缩略帧」一起存档。
+  //  用途：事后逐帧核对「自动运行到底卡在哪一步、脚本以为自己在哪个场景、
+  //        点了哪、为什么没走到预期」。把导出的 HTML 发开发者即可精确定位。
+  //  API: __narutoAuto.trace.on()/off()/toggle()/state()/download()/downloadViewer()/clear()
   // ============================================================
-  const DryRun = {
+  const AutoTrace = {
     on: false,
-    log: [],        // 记录被拦截的注入：{ kind, x, y, label, at, step }
-    maxLog: 400,
+    steps: [],
+    max: 2000,                 // 环形缓冲上限：超出丢最旧（长录制也不爆内存、不丢关键帧）
     startedAt: 0,
+    _seq: 0,
+    _thW: 320, _thH: 180, _thQ: 0.5,
+    _thCanvas: null, _thCtx: null,
+    app: null,
+
+    bind(app) { this.app = app; return this; },
 
     start() {
-      this.on = true;
-      this.log = [];
-      this.startedAt = Date.now();
-      Utils.log('warn', '🧪 干跑模式已开启：不会真实点击，只在画面上显示圆圈');
-      Marks.circle(640, 200, { label: '🧪 干跑模式（不实际点击）', color: '241,196,15', size: 64, duration: 2600 });
-      return 'dry-run ON';
+      if (this.on) return 'already ON';
+      this.on = true; this.steps = []; this._seq = 0; this.startedAt = Date.now();
+      Utils.log('warn', '🔬 自动运行追踪已开启：每次真实点击/按键都会记录（含场景+探针+帧）');
+      Marks.circle(640, 200, { label: '🔬 追踪中（真实点击全记录）', color: '46,204,113', size: 64, duration: 2600 });
+      return 'trace ON';
     },
-
     stop() {
+      if (!this.on) return 'already OFF';
       this.on = false;
-      Utils.log('info', `🧪 干跑模式关闭，共拦截 ${this.log.length} 次注入`);
-      Marks.circle(640, 200, { label: '干跑模式已关闭', color: '58,124,165', size: 64, duration: 2200 });
-      return 'dry-run OFF (' + this.log.length + ' blocked)';
+      Utils.log('info', `🔬 追踪已关闭，共 ${this.steps.length} 步`);
+      Marks.circle(640, 200, { label: '追踪已关闭', color: '58,124,165', size: 64, duration: 2000 });
+      return 'trace OFF (' + this.steps.length + ' steps)';
     },
-
     toggle() { return this.on ? this.stop() : this.start(); },
+    clear() { this.steps = []; this._seq = 0; this.startedAt = Date.now(); return 'cleared'; },
+    state() { return this.on ? ('ON（' + this.steps.length + ' 步）') : 'OFF'; },
 
-    /** 由 SdkAdapter._emit / key 调用 */
-    record(kind, p) {
-      const rec = { kind, at: Date.now() - this.startedAt };
-      if (kind === 'key') { rec.key = p.key; rec.mods = p.mods; rec.hold = p.hold; }
-      else { rec.x = p.x; rec.y = p.y; rec.logical = p.logical; }
-      this.log.push(rec);
-      if (this.log.length > this.maxLog) this.log.shift();
+    /** 抓当前场景 + 探针命中，供核对「脚本当时以为在哪」 */
+    _context() {
+      const out = { scene: 'UNKNOWN', probeHits: [], brightness: -1 };
+      try {
+        const r = this.app.scenes.detect(false);
+        out.scene = r.scene;
+        out.brightness = r.brightness;
+        if (r.hits) {
+          for (const [name, h] of Object.entries(r.hits)) {
+            if (h && h.ok) out.probeHits.push({ name, dist: Math.round(h.dist) });
+          }
+        }
+      } catch (e) { out.scene = 'ERR:' + ((e && e.message) || e); }
+      return out;
     },
 
-    /** 打印被拦截的注入序列 */
-    dump() {
-      if (!this.log.length) return '（无记录）';
-      const lines = this.log.map((r, i) => {
-        const t = (r.at / 1000).toFixed(1) + 's';
-        if (r.kind === 'key') return `${String(i + 1).padStart(3)}. [${t.padStart(6)}] ⌨ ${r.key}${r.mods && Object.keys(r.mods).length ? ' ' + JSON.stringify(r.mods) : ''}`;
-        return `${String(i + 1).padStart(3)}. [${t.padStart(6)}] 🖱 ${r.kind.padEnd(5)} (${r.x},${r.y})`;
-      });
-      console.log('%c🧪 干跑记录 ' + this.log.length + ' 条：', 'color:#f1c40f;font-weight:bold');
-      console.log(lines.join('\n'));
-      return this.log.length + ' 条（已打印）';
+    /** 抓当前帧缩略图（JPEG dataURL），失败返回 null */
+    _thumb() {
+      try {
+        if (!this.app.vision || !this.app.vision.capture) return null;
+        this.app.vision.capture(false);
+        const src = this.app.vision.canvas;
+        if (!src) return null;
+        if (!this._thCanvas) {
+          this._thCanvas = document.createElement('canvas');
+          this._thCanvas.width = this._thW; this._thCanvas.height = this._thH;
+          this._thCtx = this._thCanvas.getContext('2d');
+        }
+        this._thCtx.drawImage(src, 0, 0, this._thW, this._thH);
+        return this._thCanvas.toDataURL('image/jpeg', this._thQ);
+      } catch (e) { return null; }
     },
 
-    clear() { this.log = []; this.startedAt = Date.now(); return 'cleared'; },
+    /** 由 GameOperator 各操作入口调用（仅在 on 时，无副作用） */
+    record(kind, info) {
+      if (!this.on || !this.app) return;
+      const ctx = this._context();
+      const rec = {
+        seq: ++this._seq,
+        t: Date.now() - this.startedAt,
+        kind,                                  // 'tap' | 'swipe' | 'hold' | 'release' | 'key'
+        label: info.label || '',
+        coord: info.coord || null,             // [x,y] 或 [x1,y1,x2,y2]
+        key: info.key || null,
+        hold: info.hold || 0,
+        scene: ctx.scene,
+        brightness: ctx.brightness,
+        probeHits: ctx.probeHits,
+        frame: this._thumb(),
+      };
+      this.steps.push(rec);
+      if (this.steps.length > this.max) this.steps.shift();
+    },
+
+    dump() { return this.steps.slice(); },
+
+    /** 导出原始 JSON（含每步帧图） */
+    download() {
+      if (!this.steps.length) { Utils.log('warn', '⚠ 没有追踪数据'); return false; }
+      const meta = {
+        tool: 'naruto-auto', version: VERSION, exportedAt: new Date().toISOString(),
+        steps: this.steps.length, durationMs: this.startedAt ? (Date.now() - this.startedAt) : 0,
+      };
+      const blob = new Blob([JSON.stringify({ meta, steps: this.steps }, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'naruto-trace-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      Utils.log('info', '💾 已导出 ' + this.steps.length + ' 步追踪到 JSON');
+      return true;
+    },
+
+    /** 导出自包含 HTML 查看器（内嵌追踪数据，双击即可逐帧核对） */
+    downloadViewer() {
+      if (!this.steps.length) { Utils.log('warn', '⚠ 没有追踪数据'); return false; }
+      const html = this._viewerHtml(this.steps, VERSION);
+      const blob = new Blob([html], { type: 'text/html' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'naruto-trace-' + new Date().toISOString().replace(/[:.]/g, '-') + '.html';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      Utils.log('info', '💾 已导出 ' + this.steps.length + ' 步追踪查看器(HTML)');
+      return true;
+    },
+
+    /** 生成自包含查看器 HTML（data 已转义 <） */
+    _viewerHtml(steps, ver) {
+      const data = JSON.stringify(steps).replace(/</g, '\\u003c');
+      const parts = [];
+      parts.push('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">');
+      parts.push('<title>火影自动运行追踪 · ' + steps.length + ' 步</title>');
+      parts.push('<style>');
+      parts.push('*{box-sizing:border-box}body{margin:0;background:#0f1420;color:#e6edf3;font:14px/1.5 -apple-system,"Microsoft YaHei",sans-serif}');
+      parts.push('header{padding:12px 16px;background:#16213e;border-bottom:1px solid #2a3a5a;display:flex;align-items:center;gap:12px;flex-wrap:wrap}');
+      parts.push('header h1{font-size:16px;margin:0}header small{color:#7f8c8d}#pos{margin-left:auto;color:#7f8c8d}');
+      parts.push('#wrap{display:flex;gap:12px;padding:12px;height:calc(100vh - 56px)}');
+      parts.push('#left{flex:0 0 480px;display:flex;flex-direction:column;gap:10px}');
+      parts.push('#frame{background:#000;border:1px solid #2a3a5a;border-radius:8px;overflow:hidden}');
+      parts.push('#frame img{width:100%;display:block}');
+      parts.push('#ctrls{display:flex;gap:6px;align-items:center;flex-wrap:wrap}');
+      parts.push('button{background:#e94560;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px}');
+      parts.push('button.sec{background:#2a3a5a}');
+      parts.push('input{background:#1a2336;color:#e6edf3;border:1px solid #2a3a5a;border-radius:5px;padding:5px;width:80px}');
+      parts.push('#info{background:#16213e;border:1px solid #2a3a5a;border-radius:8px;padding:10px 12px;font-size:13px}');
+      parts.push('#info .row{display:flex;gap:8px;margin:3px 0}.row b{flex:0 0 84px;color:#7f8c8d;font-weight:600}');
+      parts.push('#hits{margin-top:6px}#hits span{display:inline-block;background:#10331f;color:#2ecc71;border:1px solid #1d5c39;border-radius:10px;padding:1px 8px;font-size:11px;margin:2px}');
+      parts.push('#list{flex:1;overflow:auto;background:#11182a;border:1px solid #2a3a5a;border-radius:8px;padding:6px}');
+      parts.push('#list .it{padding:5px 8px;border-bottom:1px solid #1c2740;cursor:pointer;font-size:12px;display:flex;gap:8px;align-items:center}');
+      parts.push('#list .it:hover{background:#1a2742}#list .it.cur{background:#3a2a1a}');
+      parts.push('#list .it .k{color:#e94560;flex:0 0 52px}#list .it .t{color:#7f8c8d;flex:0 0 56px}#list .it .lb{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}');
+      parts.push('.kind-key{color:#3498db}.kind-swipe{color:#9b59b6}.kind-hold{color:#e67e22}.kind-release{color:#95a5a6}.kind-tap{color:#e6edf3}');
+      parts.push('</style></head><body>');
+      parts.push('<header><h1>🔬 火影自动运行追踪 <small>v' + ver + ' · ' + steps.length + ' 步</small></h1>');
+      parts.push('<span id="pos"></span></header>');
+      parts.push('<div id="wrap"><div id="left">');
+      parts.push('<div id="frame"><img id="img" alt="帧"></div>');
+      parts.push('<div id="ctrls"><button id="prev">◀ 上一步</button><button id="next">下一步 ▶</button>');
+      parts.push('<button id="play" class="sec">▶ 自动播放</button><span>跳到</span>');
+      parts.push('<input id="jump" type="number" min="1" value="1"><button id="go" class="sec">前往</button></div>');
+      parts.push('<div id="info"></div></div>');
+      parts.push('<div id="list"></div></div>');
+      parts.push('<script>');
+      parts.push('var STEPS=' + data + ';');
+      parts.push('var i=0,timer=null;');
+      parts.push('var $=function(id){return document.getElementById(id)};');
+      parts.push('function fmt(ms){var s=ms/1000;return (s<60?s.toFixed(1)+"s":Math.floor(s/60)+"m"+((s%60)|0)+"s")}');
+      parts.push('function render(){var s=STEPS[i];if(!s)return;');
+      parts.push('$("img").src=s.frame||"";$("img").alt=s.frame?"点击时画面":"（无帧图）";');
+      parts.push('var c=s.coord?(s.coord.length===4?s.coord.slice(0,2).join(",")+" → "+s.coord.slice(2).join(","):s.coord.join(",")):"—";');
+      parts.push('var extra=(s.kind==="key")?("键: "+s.key+(s.hold?(" 按"+s.hold+"ms"):"")):("坐标: "+c);');
+      parts.push('var hits=(s.probeHits||[]).map(function(h){return "<span>"+h.name+" d="+h.dist+"</span>"}).join("");');
+      parts.push('$("info").innerHTML="<div class=row><b>步骤</b><span>#"+s.seq+" / "+STEPS.length+"</span></div>"+');
+      parts.push('"<div class=row><b>时间</b><span>"+fmt(s.t)+"</span></div>"+');
+      parts.push('"<div class=row><b>类型</b><span class=kind-"+s.kind+">"+s.kind+"</span></div>"+');
+      parts.push('"<div class=row><b>说明</b><span>"+(s.label||"—")+"</span></div>"+');
+      parts.push('"<div class=row><b>动作</b><span>"+extra+"</span></div>"+');
+      parts.push('"<div class=row><b>场景</b><span>"+(s.scene||"—")+" / 亮度 "+(s.brightness>=0?s.brightness.toFixed(1):"-")+"</span></div>"+');
+      parts.push('"<div class=row><b>命中探针</b></div><div id=hits>"+(hits||"<span style=\\"background:#331;color:#a55\\">无</span>")+"</div>";');
+      parts.push('$("pos").textContent="第 "+(i+1)+" / "+STEPS.length+" 步";');
+      parts.push('var its=document.querySelectorAll("#list .it");for(var k=0;k<its.length;k++){its[k].className="it"+(k===i?" cur":"")}');
+      parts.push('if(its[i])its[i].scrollIntoView({block:"nearest"})}');
+      parts.push('function go(n){i=Math.max(0,Math.min(STEPS.length-1,n));render()}');
+      parts.push('$("prev").onclick=function(){go(i-1)};$("next").onclick=function(){go(i+1)};');
+      parts.push('$("go").onclick=function(){go((parseInt($("jump").value,10)||1)-1)};');
+      parts.push('$("play").onclick=function(){if(timer){clearInterval(timer);timer=null;this.textContent="▶ 自动播放";return}this.textContent="⏸ 暂停";timer=setInterval(function(){if(i>=STEPS.length-1){clearInterval(timer);timer=null;$("play").textContent="▶ 自动播放";return}go(i+1)},900)};');
+      parts.push('var listHtml="";for(var j=0;j<STEPS.length;j++){var s=STEPS[j];var lb=(s.label||s.kind);');
+      parts.push('listHtml+="<div class=it data-i="+j+"><span class=k>"+s.kind+"</span><span class=t>"+fmt(s.t)+"</span><span class=lb>"+(lb||"")+"</span></div>"}');
+      parts.push('$("list").innerHTML=listHtml;');
+      parts.push('$("list").onclick=function(e){var d=e.target.closest(".it");if(d)go(parseInt(d.getAttribute("data-i"),10))};');
+      parts.push('render();');
+      parts.push('<\/script></body></html>');
+      return parts.join('');
+    },
   };
 
   // ============================================================
@@ -2048,7 +2195,7 @@
       if (s) {
         this.results[i] = 'run';
         if (s.coord && s.coord.length === 2 && Marks.on()) {
-          Marks.circle(s.coord[0], s.coord[1], { label: label || s.title, color: s.color, duration: DryRun.on ? 1600 : 900 });
+          Marks.circle(s.coord[0], s.coord[1], { label: label || s.title, color: s.color, duration: 900 });
         }
       }
       this.render();
@@ -2167,7 +2314,7 @@
       // 流程图画圈时不再重复画（避免同位置蓝红两圈）。label 由 FlowChart 提供时跳过。
       const drawnByFlow = typeof FlowChart !== 'undefined' && FlowChart.on && FlowChart.active >= 0 && label;
       if (!drawnByFlow) {
-        Marks.circle(x, y, label ? { label, duration: DryRun.on ? 1600 : undefined } : (DryRun.on ? { duration: 1600 } : null));
+        Marks.circle(x, y, label ? { label } : null);
       }
       this.sdk._down(x, y, 0);
       try {
@@ -2178,7 +2325,8 @@
         // ——历史上「点了没反应」的一大来源。
         this.sdk._up(x, y, 0);
       }
-      Utils.log('debug', `click(${x},${y}) → (${p.x},${p.y})${DryRun.on ? ' [dry-run]' : ''}`);
+      Utils.log('debug', `click(${x},${y}) → (${p.x},${p.y})`);
+      AutoTrace.record('tap', { coord: [x, y], label: label || '' });
       return p;
     }
 
@@ -2248,7 +2396,7 @@
       Marks.circle(x, y, { label: label || '按住普攻', duration: 1500 });
       this.sdk._down(x, y, 0);
       this._hold = { x, y };
-      if (fresh) Utils.log('info', `    👊 普攻按住不放 @(${x},${y})${DryRun.on ? ' [dry-run]' : ''}`);
+      if (fresh) Utils.log('info', `    👊 普攻按住不放 @(${x},${y})`);
       return p;
     }
 
@@ -2269,7 +2417,7 @@
     /** 当前是否处于「按住不放」状态 */
     get holding() { return !!this._hold; }
 
-    key(k) { Marks.key(k, []); return this.sdk.key(k); }
+    key(k) { Marks.key(k, []); AutoTrace.record('key', { key: k }); return this.sdk.key(k); }
   }
 
   // ============================================================
@@ -2406,10 +2554,10 @@
           if (useEsc && hasKeyboard) {
             Marks.key('Escape', ['盲按']);
             this.op.sdk.key('Escape');
-            await Utils.sleep(500);
+            await Utils.sleep(1000);
           }
           const s = spots[blindTurn++ % spots.length];
-          Marks.circle(s[0], s[1], { label: '盲按返回 #' + blindTurn, color: '241,196,15', duration: DryRun.on ? 1600 : 900 });
+          Marks.circle(s[0], s[1], { label: '盲按返回 #' + blindTurn, color: '241,196,15', duration: 900 });
           await this.op.tap(s[0], s[1], 'delay.short');
           await Utils.sleep(settleMs);   // ② 按后静置
           continue;
@@ -2418,13 +2566,13 @@
         // 视觉正常：优先二级页返回键 backBtnX，其次左下返回键 returnBtn，最后通用返回位
         if (r && r.hits.backBtnX && r.hits.backBtnX.ok) {
           const [bx, by] = (r.hits.backBtnX.clickPoint || PROBES.backBtnX.click);
-          Marks.circle(bx, by, { label: '二级页返回键(探针命中)', color: '188,140,255', duration: DryRun.on ? 1600 : 900 });
+          Marks.circle(bx, by, { label: '二级页返回键(探针命中)', color: '188,140,255', duration: 900 });
           await this.op.tap(bx, by, 'delay.short');
         } else if (r && r.hits.returnBtn && r.hits.returnBtn.ok) {
-          Marks.circle(PROBES.returnBtn.click[0], PROBES.returnBtn.click[1], { label: '返回按钮(探针命中)', color: '188,140,255', duration: DryRun.on ? 1600 : 900 });
+          Marks.circle(PROBES.returnBtn.click[0], PROBES.returnBtn.click[1], { label: '返回按钮(探针命中)', color: '188,140,255', duration: 900 });
           await this.op.tap(PROBES.returnBtn.click[0], PROBES.returnBtn.click[1], 'delay.short');
         } else {
-          Marks.circle(COORDS.common.back.x, COORDS.common.back.y, { label: '通用返回位', color: '188,140,255', duration: DryRun.on ? 1600 : 900 });
+          Marks.circle(COORDS.common.back.x, COORDS.common.back.y, { label: '通用返回位', color: '188,140,255', duration: 900 });
           await this.op.tap(COORDS.common.back.x, COORDS.common.back.y, 'delay.short');
         }
         await Utils.sleep(settleMs);   // ② 按后静置：等页面切换动画结束再进入下一轮判定
@@ -2519,7 +2667,8 @@
       // ── 安全闸 ①：本场连招总时长上限（battle.assistMaxMs，默认 150s）──────────
       // 战斗再久也不该无限连点。超过上限就停手，避免「战斗其实早已结束、辅助还在盲点」时
       // 把所在界面的按钮（如小队突袭房间的「匹配」）反复点下去。
-      const maxMs = this.config.num('battle.assistMaxMs') || 150000;
+      // 0.5.78：waitForEnd 可按场传 opts.assistMaxMs（角斗场一局实测 149s，默认 150s 贴脸）
+      const maxMs = this._assistMaxMs || this.config.num('battle.assistMaxMs') || 150000;
       if (now - this._combatT0 > maxMs) {
         if (!this._maxWarned) {
           this._maxWarned = true;
@@ -2529,11 +2678,17 @@
         return 0;
       }
 
-      // ── 安全闸 ②：画面已开始静止 → 多半已退出战斗，本拍不点 ────────────────
-      // 与 waitForEnd 的静止检测共用 this._stable：只要有一拍判定"静止"，就立刻停手，
-      // 宁可少点一次普攻，也不要把新界面上的功能按钮点下去。
+      // ── 安全闸 ②：画面已连续静止 → 多半已退出战斗，本拍不点 ────────────────
+      // 与 waitForEnd 的静止检测共用 this._stable：只有连续稳定帧数达到阈值才停手，
+      // 避免战斗中短暂静止（被击倒、双方对峙）导致普攻突然松开。
       // 0.5.59：停手的同时必须松开「按住不放」的普攻，否则云端卡住按压态。
-      if (this._stable) { this.op.releaseHold(); return 0; }
+      const stableNeed = this.config.num('vision.stableFrames') || 3;
+      if (this._stable >= stableNeed) { this.op.releaseHold(); return 0; }
+
+      // ── 安全闸 ③（0.5.79）：黑屏过场期间绝不点 ──────────────────────────────
+      //   本次 trace 实测：一局打完是「胜负已分 → 战斗结果 → 黑屏 → 奖励/任务面板」，
+      //   脚本在黑屏那两拍照旧点了 (1020,494)/(852,637) —— 面板就是这么被点开的。
+      if (this._lastScene === SCENE.LOADING) { this.op.releaseHold(); return 0; }
 
       // 每拍收尾：重建普攻按住态（0.5.61 关键修复，见 _reassertHold 注释）
       const finish = async (gap) => { this._reassertHold(holdAtk, P); return gap; };
@@ -2614,12 +2769,12 @@
       if (this.config.get('battle.autoBattle')) {
         try { await this.op.clickNatural(COORDS.battle.autoFight.x, COORDS.battle.autoFight.y, 3); }
         catch (e) { /* ignore */ }
-        await Utils.sleep(500);
+        await Utils.sleep(1000);
       }
       if (this.config.get('battle.speedUp')) {
         try { await this.op.clickNatural(COORDS.battle.speedUp.x, COORDS.battle.speedUp.y, 3); }
         catch (e) { /* ignore */ }
-        await Utils.sleep(500);
+        await Utils.sleep(1000);
       }
     }
 
@@ -2627,12 +2782,42 @@
      * 等待战斗结束
      * 三级策略：最短等待 → 结算画面指纹 → 帧差异静止 → 超时
      */
-    async waitForEnd() {
-      const minWait = this.config.num('battle.minWait') || 15000;
-      const maxWait = this.config.num('battle.maxWait') || 180000;
+    async waitForEnd(opts = {}) {
+      const minWait = (opts.minWaitMs != null ? opts.minWaitMs : this.config.num('battle.minWait')) || 15000;
+      const maxWait = (opts.maxWaitMs != null ? opts.maxWaitMs : this.config.num('battle.maxWait')) || 180000;
       const poll = this.config.num('vision.poll') || 1200;
       const stableNeed = this.config.num('vision.stableFrames') || 3;
       const threshold = this.config.get('vision.diffThreshold') || 0.012;
+
+      // ── 0.5.78 新增：按场可调的结算识别参数（不传 = 老行为，其它任务完全不受影响）──
+      // 背景（2026-09-19 用户 trace「忍术对战一场」1020 帧实证）：
+      //   ① 「胜负已分」横幅在小局之间只显示 0.3~1s（实测 #335/336、#568/569 各只采到 2 拍）
+      //      → 老条件「连续 3 拍」必然漏判，漏判后脚本继续在 黑屏/战绩/评测/入口页 上盲点。
+      //   ② 老「近 12s 出现过黑屏即确认」太松：开场的加载黑屏 + 探针误报就能凑成假结束。
+      //   ③ 静止画面（双方登场/加载）会被判成「一局打完」→ 之后 10s 空窗，真正开打时不出手。
+      const vsConfirm = opts.vsConfirm != null ? opts.vsConfirm : 3;
+      const blackWindowMs = opts.blackWindowMs != null ? opts.blackWindowMs : 12000;
+      const banDefeat = !!opts.noDefeat;               // 不认「失败」探针（角斗场：该探针在登场/加载画面必误报）
+      const endStableNeed = opts.stableEndFrames != null ? opts.stableEndFrames : stableNeed;
+      const staticEndAfterMs = opts.staticEndAfterMs != null ? opts.staticEndAfterMs : 0;
+      const bannerRecencyMs = opts.bannerRecencyMs != null ? opts.bannerRecencyMs : 30000;
+      const graceMs = opts.bannerGraceMs || 0;         // 命中横幅后的「观察窗」：判断自动续局 or 真的打完
+      // 0.5.79：画面「连续静止」兜底脱困。0.5.72 加的 battleStarted 闸有个致命副作用 ——
+      //   它是局部变量、只认「先看到过动态帧」。若 waitForEnd 一开始就落在一个**静止的陌生页面**
+      //   （战后「战斗结果 → 确定 → 奖励 → 任务面板」那一串），battleStarted 永远 false →
+      //   「静止 = 打完」这条唯一出口被永久关掉 → 脚本在该页面上盲点直到 maxWaitMs
+      //   （本次 trace 实测 360s/局，用户看到「卡住不动 + 点到别的页面」）。
+      //   现在：只要画面**连续静止** ≥ staticBailMs 就无条件兜底结束本场。
+      //   安全性：匹配/加载/双方登场这类正常过场不会像素级冻结这么久（登场上限实测约 4.5s）。
+      const staticBailMs = opts.staticBailMs != null ? opts.staticBailMs : 0;
+      // 0.5.81：**整场结束的「极暗过场」快通道**（角斗场专属）。实测数据（trace 2026-09-19T13-35-52，2000 拍）：
+      //   · 战斗中全屏最暗也有 BR 100+（7:13~7:32 整段 100~130）；
+      //   · 「小局切换」的暗帧 BR 14.0~22.3（6:47.30 / 7:06.23，不是全屏黑）；
+      //   · 「整场结束」的暗帧 BR **1.3~5.3**（7:33.33 / 7:34.75）= detect() 判 SCENE.LOADING（阈值 <12）。
+      //   → 本场已进行 ≥ darkEndAfterMs 之后出现 SCENE.LOADING，就是整场打完的过场黑幕。
+      //   时间闸专为排除「开局进战斗的加载黑屏」。0 = 关闭，其它任务完全不受影响。
+      const darkEndAfterMs = opts.darkEndAfterMs != null ? opts.darkEndAfterMs : 0;
+      this._assistMaxMs = opts.assistMaxMs != null ? opts.assistMaxMs : null;
 
       Utils.log('info', `    ⏳ 等待战斗结束（最短 ${Math.round(minWait / 1000)}s）...`);
       await this.tryEnableAuto();
@@ -2641,6 +2826,10 @@
       this._stable = 0; this._maxWarned = false;
       // 0.5.59：「黑屏 → 结算」序列确认用的时间戳/计数 + 快拍计时器，每场重新起算
       this._blackAt = 0; this._vsCnt = 0; this._subAt = 0; this._jAt = 0; this._iAt = 0;
+      // 0.5.78：本场起点（静止落判的时间闸）+ 横幅时间戳/观察窗状态
+      this._fightStart = Date.now(); this._bannerAt = 0; this._holdUntil = 0; this._holdBlack = false;
+      this._stillSince = 0;   // 0.5.79：本场「画面开始持续静止」的时间戳（0 = 画面在动）
+      this._bannerMuteUntil = 0;
       const preMs = Math.max(0, minWait - 2000);
       if (this.config.get('battle.keyAssist')) {
         await this.combatFor(preMs);   // 边打边等：连招辅助从一开始就输出
@@ -2650,6 +2839,7 @@
 
       const start = Date.now();
       let stable = 0;
+      let battleStarted = false;   // 0.5.72：必须确认战斗真正开始过，才允许「画面静止」判结束，防止匹配/选忍界面直接判结算
 
       // 只用中心区域算帧差异，避免 HUD 动画干扰
       const region = [260, 90, 1020, 560];
@@ -2675,28 +2865,73 @@
           // 1.3~4.4，而战斗中最暗的帧也有 43 → 不会互相混。
           // 注意：2026-09-13 用户明确否掉过「纯像素黑屏单独当判据」（暗场景战斗帧也可能很黑），
           // 所以这里只把它当作「序列里的一环」，主判据仍是金色横幅。
-          if (r.scene === SCENE.LOADING) this._blackAt = nowX;
-
-          if (r.scene === SCENE.BATTLE_END) {
-            this._vsCnt++;
-            const recentBlack = this._blackAt && (nowX - this._blackAt < 12000);
-            // 落判条件（OR）：
-            //   ① 近 12s 内出现过黑屏 → 序列确认，立刻判（覆盖「黑屏 → 结算」顺序）
-            //   ② 连续 2 拍命中横幅 → 覆盖「结算 → 黑屏」顺序（横幅被辅助快速点掉时的兜底，
-            //      多等 300ms 即可，几乎不影响响应——结算横幅正常会显示约 10s）
-            if (recentBlack || this._vsCnt >= 2) {
-              const which = r.byProbe === 'defeatBanner' ? '失败' : '胜负已分';
-              Utils.log('info', `    ✓ 检测到结算画面「${which}」` + (recentBlack
-                ? `（黑屏序列确认：${((nowX - this._blackAt) / 1000).toFixed(1)}s 前出现过黑屏）`
-                : `（横幅连续 ${this._vsCnt} 拍命中）`));
-              return 'settlement';
+          if (r.scene === SCENE.LOADING) {
+            this._blackAt = nowX;
+            // ── 0.5.81 快通道：极暗过场 = 整场结束 ────────────────────────────────
+            //   用户 2026-09-20 反馈「7m32s~7m33s 战斗结束没识别到」就是这里：
+            //   那两拍 BR 5.3 / 1.3（全屏黑），而旧实现只在「scene=BATTLE_END」时才用黑屏做
+            //   序列确认 —— 黑屏后画面停在结算/面板页，根本判不出 BATTLE_END，于是整条路走空。
+            //   ⚠ 必须放在下面所有闸（battleStarted / staticEndAfterMs / 静止计数）**之前**：
+            //     黑屏那几拍画面本来就不「静止」（恢复瞬间 diff 很大），走静止路径根本来不及。
+            if (darkEndAfterMs && (nowX - (this._fightStart || start)) >= darkEndAfterMs) {
+              Utils.log('info', `    ✓ 整场结束：出现全屏黑过场（本场已 ${((nowX - this._fightStart) / 1000).toFixed(0)}s`
+                + ` ≥ ${Math.round(darkEndAfterMs / 1000)}s → 不可能还在战斗中）`);
+              return 'darkend';
             }
-            Utils.log('info', '    …命中结算横幅，等黑屏或下一拍再确认');
+          }
+
+          // 0.5.70：结算判定必须稳定。战斗帧常把 avatar/dailyIcon/settleConfirm 误判成
+          // 主界面/结算，单靠一帧 r.scene 会提前返回 → 用 scenes.current（连续 2 帧一致）。
+          // 0.5.78：命中拍数阈值改由 opts.vsConfirm 决定（角斗场传 2），并允许「单拍强命中」直接落判。
+          const stableEnd = this.scenes.current === SCENE.BATTLE_END;
+          const bannerHit = r.hits.victoryBanner;
+          // 0.5.78：单拍强命中即可（victoryBanner 在本次 1020 帧零误报：横幅帧 d=7.9~24.1，
+          //   非横幅帧最近 d=175）→ 短横幅（0.3~0.5s）也能落判。
+          //   ⚠ 这条捷径默认关闭（opts.strongBanner），只给角斗场开 —— 别影响小队突袭/秘境的既有节奏。
+          const strongBanner = !!(opts.strongBanner && bannerHit && bannerHit.ok && bannerHit.dist <= 20);
+          const defeatOnly = banDefeat && r.byProbe === 'defeatBanner';
+          const muteNow = this._bannerMuteUntil && nowX < this._bannerMuteUntil;
+          if (r.scene === SCENE.BATTLE_END && stableEnd && !defeatOnly && !muteNow) {
+            this._vsCnt++;
+            const recentBlack = this._blackAt && (nowX - this._blackAt < blackWindowMs);
+            // 落判条件（OR）：
+            //   ① 单拍强命中金色「胜负已分」横幅 → 立刻判（横幅短，等不起）
+            //   ② 连续 vsConfirm 拍稳定命中（默认 3，角斗场传 2）
+            //   ③ 近 blackWindowMs 内出现过黑屏 → 序列确认（角斗场收到 4s；12s 太松会误判）
+            if (recentBlack || strongBanner || this._vsCnt >= vsConfirm) {
+              const which = r.byProbe === 'defeatBanner' ? '失败'
+                : (r.byProbe === 'squadVictory' ? '胜利' : '胜负已分');
+              Utils.log('info', `    ✓ 检测到结算画面「${which}」` + (strongBanner
+                ? `（金色横幅单拍强命中 d=${bannerHit.dist.toFixed(0)}）`
+                : recentBlack
+                  ? `（黑屏序列确认：${((nowX - this._blackAt) / 1000).toFixed(1)}s 前出现过黑屏）`
+                  : `（横幅连续 ${this._vsCnt} 拍命中）`));
+              this._bannerAt = nowX;
+              if (graceMs > 0) {
+                // 0.5.78：先不判结束 —— 实测「一局打完」= 横幅 → 黑屏过场 → ①自动续下一小局
+                //   或 ②整场打完（战绩/评测/入口页）。给 graceMs 观察窗，续局就直接接着辅助，
+                //   避免旧实现 return 后任务固定 sleep(10s) 造成的 13s 空窗（用户反馈"不按键"主因之一）。
+                //   注意：已在观察窗内又命中（横幅还在屏上）只刷新时间戳，不重复开窗 —— 否则横幅只要
+                //   一直显示，观察窗就会无限续期、永远不超时。
+                if (!this._holdUntil) {
+                  this._holdUntil = nowX + graceMs;
+                  this._holdBlack = false;
+                  this._vsCnt = 0;
+                  Utils.log('info', `    ⏸ 进入 ${Math.round(graceMs / 1000)}s 观察窗：自动续局则继续连招，否则判本局结束`);
+                }
+              } else {
+                return 'settlement';
+              }
+            } else {
+              Utils.log('info', '    …命中结算横幅，等黑屏或下一拍再确认');
+            }
           } else {
             this._vsCnt = 0;   // 没连续命中就清零，避免战斗中的偶发命中累积
           }
 
-          if (r.scene === SCENE.HOME) {
+        // 0.5.70：HOME 也必须稳定（current === HOME）才返回，避免战斗 UI（头像/技能区）
+          // 被误判为主界面导致 waitForEnd 提前退出。
+          if (r.scene === SCENE.HOME && this.scenes.current === SCENE.HOME) {
             Utils.log('info', '    ✓ 已回到主界面');
             return 'home';
           }
@@ -2716,17 +2951,73 @@
 
           if (diff < threshold) {
             stable++;
-            this._stable = stable;
-            Utils.log('debug', `    画面静止 ${stable}/${stableNeed} (diff=${diff.toFixed(4)})（静止期间暂停连招点击）`);
-            if (stable >= stableNeed) {
-              Utils.log('info', '    ✓ 画面连续静止，判定战斗结束');
-              return 'stable';
+            // 0.5.79：_stable 改为**单调不减**（直到画面重新动起来）。
+            //   旧写法在下面两道「先不判结束」的闸里把它清零 → combatStep 的「静止即停手」被解禁
+            //   → 卡在陌生页面上时一直在盲点。现在保持 ≥ 阈值，手不离开也点不下去。
+            this._stable = Math.max(this._stable, stable);
+            if (!this._stillSince) this._stillSince = nowX;
+            const stillMs = nowX - this._stillSince;
+            // 日志节流：旧写法每 300ms 打一条（静止几百秒就是上千条），现在只在关键拍打
+            if (stable === 1 || stable % 10 === 0) {
+              Utils.log('debug', `    画面静止 ${stable}/${endStableNeed} (diff=${diff.toFixed(4)}`
+                + ` 已连续静止 ${(stillMs / 1000).toFixed(1)}s)（静止期间暂停连招点击）`);
+            }
+            // ── 0.5.79 兜底脱困：连续静止太久 → 不可能是在战斗，直接结束本场 ──────────
+            //   放在所有闸之前，**无视 battleStarted / staticEndAfterMs** —— 这正是旧实现
+            //   永远走不到出口的那条路（见 waitForEnd 顶部注释）。
+            if (staticBailMs && stillMs >= staticBailMs) {
+              Utils.log('warn', `    ⚠ 画面已连续静止 ${(stillMs / 1000).toFixed(1)}s`
+                + `（≥ ${Math.round(staticBailMs / 1000)}s）→ 判定已不在战斗中，兜底结束本场`);
+              return 'frozen';
+            }
+            if (stable >= endStableNeed) {
+              // 0.5.72：没真正开打过（还在匹配/加载/选忍界面）就别把静止当战斗结束，
+              // 否则角斗场会「一局都没打完」就判定完成、直接进下一轮。
+              const aliveMs = Date.now() - (this._fightStart || start);
+              const recentBanner = this._bannerAt && (Date.now() - this._bannerAt < bannerRecencyMs);
+              // 0.5.78：再加一道时间闸。忍术对战「双方登场」画面实测会静止 4.5s 以上
+              //   （trace #42~#62 连续 21 帧完全不动），那时战斗根本还没开始 —— 直接判结束
+              //   就会出现「开局 15s 判打完 + 空窗 10s + 真正开打时脚本不出手」。
+              if (!battleStarted) {
+                Utils.log('info', '    画面静止但战斗尚未真正开始，忽略（可能还在匹配/加载界面），继续等待');
+                // 0.5.79：只清局部计数，**不清 this._stable** → 保持「静止即停手」
+                stable = 0;
+              } else if (staticEndAfterMs && aliveMs < staticEndAfterMs && !recentBanner) {
+                Utils.log('info', `    …画面静止 ${stable} 拍，但本场仅 ${(aliveMs / 1000).toFixed(1)}s`
+                  + `（静止落判闸 ${Math.round(staticEndAfterMs / 1000)}s）且近期无结算横幅 → 先不判结束（多半还在登场/加载画面）`);
+                // 0.5.79：同上，保持停手
+                stable = 0;
+              } else {
+                Utils.log('info', '    ✓ 画面连续静止，判定战斗结束');
+                return 'stable';
+              }
             }
           } else {
             stable = 0;
+            this._stillSince = 0;   // 0.5.79：画面重新动起来 → 静止计时归零
+            // 0.5.72：首次出现「非加载画面的动态帧」即确认战斗已开始，后续静止才允许判结束
+            if (r.scene !== SCENE.LOADING) battleStarted = true;
             // 画面重新动起来 → 说明又开了一场（多为辅助误触「匹配」）→ 重置静止保护并重新计时该场
             if (this._stable) this._combatT0 = Date.now();
             this._stable = 0;
+          }
+
+          // ── 0.5.78：横幅观察窗结算（黑屏过场后画面是否重新动起来）──────────────
+          //   · 动起来 → 自动续下一小局：撤回暂停、连招上限重新计时，接着打（不出任务层）
+          //   · 窗口结束仍不动/黑屏 → 本局（整场）真的打完 → 返回 settlement
+          if (this._holdUntil) {
+            if (r.scene === SCENE.LOADING) {
+              this._holdBlack = true;
+            } else if (this._holdBlack && diff >= threshold) {
+              Utils.log('info', '    ↻ 过场后画面重新动起来 → 判定自动续局，继续连招辅助');
+              this._holdUntil = 0; this._holdBlack = false;
+              this._bannerMuteUntil = Date.now() + 4000;   // 横幅余像别立刻再落判一次
+              this._combatT0 = 0;                          // 新一小局：连招计时/上限重算
+              this._stable = 0; stable = 0; this._bannerAt = 0;
+            } else if (nowX >= this._holdUntil) {
+              Utils.log('info', '    ✓ 观察窗内画面始终未恢复动态 → 判定本局结束');
+              return 'settlement';
+            }
           }
         }
 
@@ -2734,7 +3025,8 @@
         // 是按某张地图实测的，换个地图就判不出 BATTLE，会导致 15s 后一次都不点（用户看到"没反应"）。
         // 这里只排除已判定的结算/主界面（那两种情况上面已 return），再叠加 0.5.51 的「静止即停手」：
         // 画面一旦开始静止（退出战斗的典型征兆）就立刻停手，避免把新界面的按钮点下去。
-        const stillFighting = this._lastScene !== SCENE.BATTLE_END && this._lastScene !== SCENE.HOME && !this._stable;
+        const stillFighting = !this._holdUntil && this._lastScene !== SCENE.BATTLE_END
+          && this._lastScene !== SCENE.HOME && !this._stable;
         const comboGap = (this.config.get('battle.keyAssist') && stillFighting) ? (await this.combatStep()) : 0;
         await Utils.sleep(comboGap || (due ? 150 : 200));
       }
@@ -2788,7 +3080,7 @@
      */
     async run(opts = {}) {
       try {
-        const reason = await this.waitForEnd();
+        const reason = await this.waitForEnd(opts);
         this.op.releaseHold();               // 先松手，再做结算/导航点击（避免按压态干扰）
         if (opts.noHome) return reason;
         await this.clearSettlement();
@@ -2837,7 +3129,7 @@
         if (r.scene === SCENE.DAILY) return 'room';
         if (r.scene === SCENE.BATTLE) return 'battle';
         if (r.scene === SCENE.HOME) return 'home';
-        await Utils.sleep(600);
+        await Utils.sleep(1000);
       }
       return 'timeout';
     }
@@ -3010,6 +3302,58 @@
       }
       return churn;
     }
+
+    /** 按录制时间间隔回放动作序列（tap/drag/key）。
+     *  seq: [{kind:'tap',x,y,dt}, {kind:'drag',x1,y1,x2,y2,duration,dt}, {kind:'key',key,hold,dt}]
+     *  dt 为相对上一动作的时间间隔（ms）。
+     *  用于秘境挑战 1:1 复刻录制按键。 */
+    async replaySeq(seq, opts) {
+      const o = opts || {};
+      const label = o.label || '录制回放';
+      this._advance(label);
+      const t0 = Date.now();
+      for (let i = 0; i < seq.length; i++) {
+        Runtime.check();
+        const s = seq[i];
+        const targetMs = s.dt || 0;
+        const nowMs = Date.now() - t0;
+        const wait = Math.max(0, targetMs - nowMs);
+        if (wait > 0) await Utils.sleep(wait);
+        if (s.kind === 'tap') {
+          await this.op.tap(s.x, s.y);
+        } else if (s.kind === 'drag') {
+          await this.op.swipe(s.x1, s.y1, s.x2, s.y2, s.duration || 600);
+        } else if (s.kind === 'key') {
+          const hold = (s.hold > 60 ? s.hold : 60);
+          await this.op.sdk.key(s.key, null, hold);
+        }
+      }
+      this.stepResult(true);
+    }
+
+    /** 识别当前战斗顶部中央的秘境名称，返回 luoyan/dufeng/leiting 或 null */
+    async identifyRealmName() {
+      const tmpls = await loadRealmNameTemplates();
+      const rx = Math.round(BASE_W * SECRET_REALM_NAME_REGION[0]);
+      const ry = Math.round(BASE_H * SECRET_REALM_NAME_REGION[1]);
+      const rw = Math.round(BASE_W * SECRET_REALM_NAME_REGION[2]);
+      const rh = Math.round(BASE_H * SECRET_REALM_NAME_REGION[3]);
+      let bestRealm = null, bestScore = Infinity;
+      for (const realm of Object.keys(tmpls)) {
+        const res = this.vision.findTemplate(tmpls[realm], [rx, ry, rw, rh], { step: 2, thresh: 25 });
+        if (res.ok && res.score < bestScore) {
+          bestScore = res.score;
+          bestRealm = realm;
+        }
+      }
+      if (bestRealm) {
+        Utils.log('info', `    秘境识别: ${bestRealm} (score=${bestScore.toFixed(1)})`);
+      } else {
+        Utils.log('warn', '    秘境识别失败');
+      }
+      return bestRealm;
+    }
+
     log(...a) { Utils.log('info', '   ', ...a); }
   }
 
@@ -3095,32 +3439,744 @@
     });
   }
 
+
+  // ============================================================
+  //  秘境挑战（secretRealm）录制回放专用常量
+  //  来源：
+  //    - 导航宏：秘境探险.json 前 6 步
+  //    - 战斗宏：naruto-calib-2026-09-17T15-30/38/44 → 落岩/毒风/雷霆
+  //    - 名称模板：从对应 calib 战斗帧顶部中央抠取
+  //  退出/继续战斗坐标由用户根据默认 UI 位置指定，可在面板配置覆盖。
+  // ============================================================
+  const SECRET_REALM_EXIT_BATTLE = [430, 500];   // 「退出战斗」左按钮（非目标秘境点这里）
+  const SECRET_REALM_CONTINUE_BATTLE = [850, 500]; // 「继续战斗」右按钮（目标秘境点这里）
+  const SECRET_REALM_CHALLENGE = [1165, 587];    // 匹配界面「系统匹配/挑战」按钮
+
+
+// AUTO-GENERATED secret realm macros & templates (do not hand-edit)
+const SECRET_REALM_NAV = [{"kind": "drag", "x1": 973, "y1": 299, "x2": 12, "y2": 299, "duration": 652, "dt": 0}, {"kind": "drag", "x1": 981, "y1": 312, "x2": 117, "y2": 296, "duration": 505, "dt": 1265}, {"kind": "tap", "x": 614, "y": 403, "dt": 1999}, {"kind": "tap", "x": 79, "y": 329, "dt": 3356}, {"kind": "tap", "x": 949, "y": 531, "dt": 3568}, {"kind": "tap", "x": 1165, "y": 587, "dt": 2946}];
+
+const SECRET_REALM_MACROS = {"luoyan": [{"kind": "key", "key": "d", "hold": 1445, "dt": 0}, {"kind": "key", "key": "j", "hold": 0, "dt": 1477}, {"kind": "key", "key": "i", "hold": 0, "dt": 64}, {"kind": "key", "key": "i", "hold": 542, "dt": 553}, {"kind": "key", "key": "o", "hold": 797, "dt": 889}], "dufeng": [{"kind": "key", "key": "d", "hold": 0, "dt": 0}, {"kind": "key", "key": "w", "hold": 621, "dt": 77}, {"kind": "key", "key": "d", "hold": 0, "dt": 1853}, {"kind": "key", "key": "w", "hold": 61, "dt": 48}, {"kind": "key", "key": "d", "hold": 0, "dt": 767}, {"kind": "key", "key": "w", "hold": 107, "dt": 239}, {"kind": "key", "key": "j", "hold": 0, "dt": 1702}, {"kind": "key", "key": "i", "hold": 0, "dt": 66}, {"kind": "key", "key": "i", "hold": 328, "dt": 611}, {"kind": "key", "key": "o", "hold": 958, "dt": 722}, {"kind": "key", "key": "k", "hold": 1457, "dt": 5261}, {"kind": "key", "key": "j", "hold": 426, "dt": 1671}, {"kind": "key", "key": "i", "hold": 1086, "dt": 1253}, {"kind": "key", "key": "k", "hold": 6379, "dt": 1251}, {"kind": "key", "key": "d", "hold": 0, "dt": 32555}, {"kind": "key", "key": "w", "hold": 446, "dt": 557}, {"kind": "key", "key": "w", "hold": 123, "dt": 947}, {"kind": "key", "key": "j", "hold": 0, "dt": 2057}, {"kind": "key", "key": "i", "hold": 0, "dt": 76}, {"kind": "key", "key": "i", "hold": 263, "dt": 648}, {"kind": "key", "key": "o", "hold": 1379, "dt": 699}, {"kind": "key", "key": "i", "hold": 2113, "dt": 5361}, {"kind": "key", "key": "j", "hold": 861, "dt": 2230}, {"kind": "key", "key": "i", "hold": 2692, "dt": 1699}, {"kind": "key", "key": "d", "hold": 973, "dt": 6121}, {"kind": "key", "key": "k", "hold": 416, "dt": 997}, {"kind": "key", "key": "k", "hold": 389, "dt": 1394}, {"kind": "key", "key": "j", "hold": 268, "dt": 912}, {"kind": "key", "key": "i", "hold": 772, "dt": 1616}, {"kind": "key", "key": "o", "hold": 136, "dt": 1443}], "leiting": [{"kind": "key", "key": "d", "hold": 0, "dt": 0}, {"kind": "key", "key": "w", "hold": 130, "dt": 438}, {"kind": "key", "key": "j", "hold": 0, "dt": 3239}, {"kind": "key", "key": "i", "hold": 511, "dt": 60}, {"kind": "key", "key": "k", "hold": 3712, "dt": 1454}, {"kind": "key", "key": "j", "hold": 662, "dt": 3810}, {"kind": "key", "key": "i", "hold": 1070, "dt": 1600}, {"kind": "key", "key": "o", "hold": 1088, "dt": 1199}]};
+
+const SECRET_REALM_NAME_TEMPLATES = {"luoyan": "data:image/jpeg;base64,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", "dufeng": "data:image/jpeg;base64,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", "leiting": "data:image/jpeg;base64,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"};
+
+const SECRET_REALM_NAME_REGION = [0.25, 0.01, 0.5, 0.18];
+
+let _realmNameTemplates = null;
+/** 懒加载秘境名称模板画布 */
+function loadRealmNameTemplates() {
+  if (_realmNameTemplates) return Promise.resolve(_realmNameTemplates);
+  return new Promise((resolve, reject) => {
+    const out = {};
+    const keys = Object.keys(SECRET_REALM_NAME_TEMPLATES);
+    let done = 0;
+    for (const k of keys) {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        out[k] = c;
+        done++;
+        if (done === keys.length) { _realmNameTemplates = out; resolve(out); }
+      };
+      img.onerror = () => reject(new Error('秘境名称模板加载失败: ' + k));
+      img.src = SECRET_REALM_NAME_TEMPLATES[k];
+    }
+  });
+}
+
+  // ============================================================
+  //  任务集会所（missionHall）0.5.75 起 —— 顶部槽位判空闲 + 宝箱筛选 + 常驻循环
+  //  0.5.80：按 2026-09-11 真机录制「任务集会所1 / 任务集会所2」二次标定（见下方「0.5.80 二次标定」段）
+  //
+  //  ── 几何（游戏 1280x720；实测自 2026-09-18 用户提供的 16 张真机截图）──
+  //   奖励格：x = 799/879/961/1042（间距 80），y = 261/374/484（行内从 799 起连续填充）
+  //     ⚠⚠ 宝箱 = 该行**最右侧**奖励格！行内奖励项 1~4 个不定，绝不能固定取第 3 格
+  //   接取按钮：x = 1173，y = 285/398/510；金色 = 可接取
+  //   顶部 3 个派遣槽位：中心 x = 650/767/885（图标与标签同轴）
+  //     图标带 y 118~170；标签行 y 178~196（「可领取」或倒计时）
+  //
+  //  ── 空闲判定（0.5.75 按用户口径重写）──
+  //   ❌ 不再看底部「可接受任务: N/9」——该计数在任务**完成的那一刻就归还**：
+  //      真机 #7 三个槽位全是「可领取」时它仍显示 9/9，把它当空闲数 → 会以为有 3 个
+  //      空位去硬接，实际 3 个槽都被未领取的任务占着。
+  //   ✅ 只看顶部 3 个槽位，每槽三态之一：空缺 / 计时中 / 可领取
+  //        空闲位 = 「可领取」数 + 「空缺」数
+  //        满 3   = 3 个槽**全部计时中**（既无可领取、也无空缺）
+  //      即「有空闲」的充要条件就是用户说的：上面有可领取 或 有空缺。
+  //      （领掉「可领取」后该槽变为空缺，所以可领取等价于「可腾出」。）
+  //
+  //  ── 三态判据（16 张真机截图 × 3 槽 = 48 个样本实测，余量都很宽）──
+  //   ① 空缺：图标带没有图标 —— 空槽 V≤70.5 / S≤10.3，有图标 V≥77.4 / S≥24.2 → 阈值 V>74 且 S>16
+  //   ② 可领取：标签行灰度 SAD 命中模板 —— 可领取 6.8~9.7，计时中 45.9~52.0 → 阈值 25（余量 36）
+  //   ③ 剩下的「有图标但不命中」即为计时中（在跑）
+  //   交叉校验：可领取的图标外围有一圈**金色光晕**（光环 V 65.1~74.4，计时中 56.8~61.0），
+  //   模板万一在某环境下漏检就用光晕兜底；两个信号都写进日志，便于回传定位。
+  //
+  //  ── 0.5.80 二次标定（依据 2026-09-11 用户真机录制「任务集会所1」+「任务集会所2」）──
+  //   录制内容（= 用户手动走通的正解）：
+  //     「任务集会所1」进面板：drag (325,282)→(1117,273) dur 532
+  //                           drag (301,282)→(1017,294) dur 692
+  //                           click (545,466)
+  //     「任务集会所2」接任务：click (1173,398) 接取第 2 行 → click (936,580) 推荐小队
+  //                           → click (1172,627) 出发
+  //   与脚本逐项比对：
+  //     ✅ entry(545,466) / acceptBtn(936,580) / launchBtn(1172,627) / btnX 1173 —— 全部一致
+  //     ❌ 两段拖动的 y 写的是 360，录制实测 **282**（差 78px）→ 已改（MISSION.swipeY）
+  //        · 主场景 (301,282) 图像 std≈3.9（纯色远景＝干净的起拖区）
+  //        · 主场景 (301,360) 图像 std≈31.7（压在 UI 元素上，起拖易被当成点击吞掉）
+  //     ❌ panel 判据 `hangOk || btnOk>=2` 太松：点「接取」后的**推荐小队页**与随后的
+  //        **出发页**在 (1171,653) 处同样有金色 → hangOk 命中 → 误判「还在面板」→
+  //        后续 collectDone / keepAlive 在这两页乱点（「点到其他页面」的成因之一）。
+  //        已收紧为 `btnOk>=2`（+ 「可领取」标签模板复核兜底）
+  //     ❌ 槽位**光晕兜底**没有量程上限：非面板页光晕 86~228 会把 3 个槽位全判「可领取」。
+  //        已加上限 MISSION_GLOW_V_MAX
+  //   六帧实测（进面板 3 帧 + 面板/推荐小队页/出发页）：
+  //     btnOk        : 面板 3 │ 主场景 0 │ 推荐小队 0 │ 出发页 0
+  //     hangOk       : 面板 1 │ 主场景 0 │ 推荐小队 1 │ 出发页 1   ← 不可单独作判据
+  //     「可领取」SAD : 面板 11.6 │ 主场景 48~52 │ 推荐小队 63~107 │ 出发页 63~89（阈值 25）
+  //     槽位光晕      : 面板 58~68 │ 主场景 141~166 │ 推荐小队 86~228 │ 出发页 86~228
+  //   槽位三态在面板帧上的交叉验证：#1 模板 11.6 + 光晕 68.0 → 可领取；#2 SAD 46.1/光晕 61.1 → 计时中；
+  //                              #3 S≈11.2 → 空缺 （两个独立信号结论一致）
+  // ============================================================
+  const MISSION = {
+    // —— 候选任务 3 行（红/蓝宝箱从这里挑）——
+    cellX: [799, 879, 961, 1042],
+    cellY: [261, 374, 484],
+    btnX: 1173,
+    btnY: [285, 398, 510],
+    // —— 顶部 3 个派遣槽位（空闲/满 3 的唯一判据）——
+    slotCx: [650, 767, 885],     // 槽位中心 x（图标与标签同轴，实测）
+    slotIconCy: 158,             // 领取落点①：图标带内偏下（0.5.77 按真机录制 (648,166) 下调）
+    slotLabelCy: 187,            // 领取落点②：「可领取 ▶▶▶」标签行（图标没反应时改点这里）
+    slotBandHW: 40,              // 图标带半宽
+    iconY0: 118, iconY1: 170,    // 图标带上下边
+    labelY0: 178,                // 标签行上边（模板高 18）
+    labelW: 54, labelH: 18,
+    labelPad: 14,                // 标签模板横向搜索余量
+    concurrency: 3,              // = 顶部槽位数（同时可派遣上限，用户口径）
+    loopMin: 30,                 // 每轮间隔（分钟）—— 任务半小时刷新一轮
+    loopHours: 8,                // 常驻循环总时长上限（小时）
+    keepAliveMin: 3,             // ⚠ 0.5.81 起**不再使用**（面板内轻点/短滑实测仍被判「无操作」超时）
+    /** 0.5.81：每轮领取/补接结束后**回主界面**等待的分钟数，到点再重新拖屏进面板。
+     *  用户口径（2026-09-20）：「集会所任务完成后就回到桌面，然后间隔 5min，再重新执行集会所任务，
+     *  这样就能在主界面和集会所界面之间来回切换」—— 靠两个界面来回切换保持活跃，
+     *  替代旧的面板内保活（用户实测「左右滑动还是被判无操作超时」）。 */
+    pollMin: 5,
+    acceptBtn: [936, 580],       // 接取 → 推荐小队
+    launchBtn: [1172, 627],      // 接取 → 出发
+    // —— 主界面入口路径（0.5.80 按 2026-09-11 真机录制「任务集会所1」标定）——
+    //   录制原始手势：drag (325,282)→(1117,273) 532ms / drag (301,282)→(1017,294) 692ms / click (545,466)
+    //   ⚠ 0.5.75~0.79 这里写的是 y=360，与录制实测的 282 差 78px → 0.5.80 改回录制值
+    swipeY: 282,                 // 两段拖动的高度（真机录制实测；次段录制落点 294，取同一高度更稳）
+    swipeYAlt: 360,              // 备用拖动高度（旧值：首轮没打开面板时再按这个高度重拖一次）
+    entry: [545, 466],           // 主界面「任务集会所」入口（与录制一致）
+    entryAlt: [591, 480],        // 入口备用落点（0.5.77：真机录制录到的新位置）
+    // —— 「多个任务可领取」时的确认弹窗（0.5.77 真机录制 step4/5）——
+    //   点任一「可领取」槽位图标 → 弹「当前有多个任务奖励可领取，是否一键领取所有奖励？」
+    popupOkBtn: [519, 451],      // 「确定」（左，实测中心）
+    popupCancelBtn: [754, 450],  // 「取消」（右，我们从不点它）
+    popupBox: [362, 227, 916, 500],  // 弹窗主体区（浅米色占比判据用）
+    // —— 「恭喜你获得」奖励展示浮层（领取成功后覆盖全屏，点一下收起）——
+    overlayPts: [[528, 457], [640, 620], [360, 672]],  // 收起落点，依次尝试
+    // —— 面板内保活（长时间不动云游戏会超时断连）——
+    keepAlivePt: [360, 672],     // 轻点落点：面板底部空白（避开左下「返回」x≤140 与右下「换一组」x≥1097）
+    keepAliveDrag: [408, 672, 312, 672],  // 单向短滑起终点（偶次保活用，96px 小位移）
+    // —— 面板特征锚点 ——
+    hangBtnPt: [1171, 653],      // 右下「换一组」金色按钮
+                                 //   ⚠ 0.5.80 实测：它**不是**面板独有 —— 推荐小队页 (212,181,78) /
+                                 //     出发页 (207,174,73) 同位置也有金色元素，hangOk 会误命中
+                                 //     （放大采样块到 23x16 后推荐小队页 r-b 仍=116，过线）。
+                                 //     现在它只负责「触发模板复核」这一件事，见 panelAnchors / anchorsOf。
+  };
+  const MISSION_DONE_SAD = 25;     // 「可领取」SAD 阈值（命中 6.8~9.7 / 计时中 45.9~52.0）
+  // —— 槽位「有图标 / 空槽」判据（0.5.77 换成以**饱和度**为主）——
+  //   空槽：S 实测 ≤10.3（旧 16 张样本）/ 8.4~9.1（新 3 张）
+  //   有图标：S 实测 ≥24.2（旧）/ 57.6~70.1（新）
+  //   阈值 18 → 两侧余量 8 / 6；旧判据 V>74 的空槽实测最高 70.7，余量只有 3.3，太险
+  //   ⚠ 必须用 S 而不是 V：槽位全空时面板会显示「还没有领取任务，快来领取任务吧！」浅色提示文字，
+  //     它压在图标带上会把 V 抬上来；但文字是灰白的，S 依然很低 → S 判据不受影响
+  const MISSION_SLOT_S = 18;
+  const MISSION_SLOT_V = 50;       // 辅助下限（防空槽装饰纹误判）
+  const MISSION_POPUP_PALE = 0.55; // 「一键领取」确认弹窗：主体区浅米色占比（弹窗 0.74 / 其它 ≤0.37）
+  const MISSION_DARK_LUM = 60;     // 「恭喜你获得」浮层：面板区亮度（浮层 33 / 正常面板 ≥81）
+  const MISSION_GLOW_V = 63;       // 金色光晕兜底阈值（可领取 ≥65.1 / 计时中 ≤61.0）
+  /** 光晕兜底的**量程上限**（0.5.80 新增）。
+   *  ⚠ 光晕只在「面板内」才有区分度：面板 56.8~74.4（本次录制新增 61.1 / 68.0）。
+   *    readSlots 一旦被非面板页面调用，主场景 141~166 / 推荐小队页·出发页 86~228
+   *    会**全部**被误判成「可领取」→ collectDone 就会在那些页面上乱点。
+   *  80 取在面板最高 74.4（余量 5.6）与非面板最低 86.1（余量 6.1）的中间。 */
+  const MISSION_GLOW_V_MAX = 80;
+  const MISSION_SLOT_TXT = { empty: '空缺', running: '计时中', done: '可领取' };
+
+  // 顶部槽位「可领取」标签模板（从真机 16 张样本的 #7 槽1 抠取，54x18）
+  //   实测：可领取 6.8~9.7；计时中（数字+时分秒）45.9~52.0；空槽无文字 61.7~63.6
+  //   → 阈值 25，判别余量 36，非常稳
+  const MISSION_KELINGQU_SRC = 'data:image/png;base64,' + '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';
+  let _mhKelingquTmpl = null;
+  function loadMissionKelingquTmpl() {
+    if (_mhKelingquTmpl) return Promise.resolve(_mhKelingquTmpl);
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        _mhKelingquTmpl = c;
+        resolve(c);
+      };
+      img.onerror = () => reject(new Error('任务集会所「可领取」模板加载失败'));
+      img.src = MISSION_KELINGQU_SRC;
+    });
+  }
+
+  const MissionHall = {
+    /** 取一块区域的 RGB 均值 */
+    _mean(D, W, cx, cy, hw, hh) {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = cy - hh; y < cy + hh; y++) {
+        for (let x = cx - hw; x < cx + hw; x++) {
+          const i = (y * W + x) * 4;
+          r += D[i]; g += D[i + 1]; b += D[i + 2]; n++;
+        }
+      }
+      return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n) };
+    },
+    /** 区域亮度均值 v / 饱和度均值 s */
+    _stat(D, W, cx, cy, hw, hh) {
+      let v = 0, s = 0, n = 0;
+      for (let y = cy - hh; y < cy + hh; y++) {
+        for (let x = cx - hw; x < cx + hw; x++) {
+          const i = (y * W + x) * 4;
+          const r = D[i], g = D[i + 1], b = D[i + 2];
+          const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+          v += mx; s += mx - mn; n++;
+        }
+      }
+      return { v: v / n, s: s / n };
+    },
+    /** 该奖励格是否有内容：真机实测空格背景 V≈52~56/S≈33~37，有格 V>95/S>45 */
+    hasCell(D, W, cx, cy) {
+      const st = this._stat(D, W, cx, cy, 30, 30);
+      return st.v > 95 && st.s > 45;
+    },
+    /** 该行**最右**奖励格（=宝箱格）中心 x；整行都空（已接取置灰）返回 null */
+    chestCellX(D, W, rowIdx) {
+      const cy = MISSION.cellY[rowIdx];
+      let last = null;
+      for (let k = 0; k < MISSION.cellX.length; k++) {
+        if (this.hasCell(D, W, MISSION.cellX[k], cy)) last = MISSION.cellX[k];
+      }
+      return last;
+    },
+    _px(D, W, x, y) {
+      const i = (y * W + x) * 4;
+      const r = D[i], g = D[i + 1], b = D[i + 2];
+      return { p: [r, g, b], s: Math.max(r, g, b) - Math.min(r, g, b) };
+    },
+    _hue(r, g, b) {
+      r /= 255; g /= 255; b /= 255;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+      if (d === 0) return 0;
+      let h;
+      if (mx === r) h = ((g - b) / d) % 6;
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60; if (h < 0) h += 360;
+      return h;
+    },
+    /** 宝箱格边框主色相（内圈 1~5px，取饱和度最高 1/4 像素的中位色） */
+    frameHue(D, W, cx, cy) {
+      const hw = 36, hh = 36, pts = [];
+      for (let off = 1; off <= 5; off++) {
+        const yt = cy - hh + off, yb = cy + hh - off;
+        const xl = cx - hw + off, xr = cx + hw - off;
+        for (let x = xl; x <= xr; x += 2) { pts.push(this._px(D, W, x, yt)); pts.push(this._px(D, W, x, yb)); }
+        for (let y = yt; y <= yb; y += 2) { pts.push(this._px(D, W, xl, y)); pts.push(this._px(D, W, xr, y)); }
+      }
+      pts.sort((a, b) => a.s - b.s);
+      const sel = pts.slice(pts.length - Math.max(8, pts.length >> 2));
+      const med = [0, 1, 2].map(ch => {
+        const vs = sel.map(p => p.p[ch]).sort((a, b) => a - b);
+        return vs[vs.length >> 1];
+      });
+      return this._hue(med[0], med[1], med[2]);
+    },
+    /** 该行宝箱类型：'red' | 'blue' | 'green' | null（整行置灰/无格） */
+    chestType(D, W, rowIdx) {
+      const cx = this.chestCellX(D, W, rowIdx);
+      if (cx == null) return null;
+      const h = this.frameHue(D, W, cx, MISSION.cellY[rowIdx]);
+      if (h >= 95 && h < 175) return 'green';
+      if (h >= 175 && h < 260) return 'blue';
+      if (h >= 260 && h < 350) return 'red';
+      return null;
+    },
+    /** 接取按钮是否可点（金色）：真机实测可点区均值≈(169,135,49) */
+    btnAvailable(D, W, rowIdx) {
+      const m = this._mean(D, W, MISSION.btnX, MISSION.btnY[rowIdx], 23, 16);
+      return m.r > 130 && (m.r - m.b) > 70 && m.g > 90;
+    },
+
+    // ————— 顶部槽位三态判定 —————
+    /** 槽位图标带统计（亮度均值 v / 饱和度均值 s） */
+    iconStat(D, W, k) {
+      const y0 = MISSION.iconY0, y1 = MISSION.iconY1;
+      return this._stat(D, W, MISSION.slotCx[k], (y0 + y1) / 2, MISSION.slotBandHW, (y1 - y0) / 2);
+    },
+    /** 该槽位是否有任务图标（空槽是一条平带：S≤10.3；有图标 S≥24.2） */
+    slotOccupied(D, W, k) {
+      const st = this.iconStat(D, W, k);
+      return st.s > MISSION_SLOT_S && st.v > MISSION_SLOT_V;
+    },
+    /** 图标外围「金色光晕」亮度均值（可领取才有；空槽装饰纹也偏亮，故只在确认有图标时才用） */
+    glowV(D, W, k) {
+      const cx = MISSION.slotCx[k];
+      let sum = 0, n = 0;
+      for (let y = 122; y < 166; y += 2) {
+        for (let dx = -56; dx < -44; dx += 2) { const i = (y * W + cx + dx) * 4; sum += Math.max(D[i], D[i + 1], D[i + 2]); n++; }
+        for (let dx = 44; dx < 56; dx += 2) { const i = (y * W + cx + dx) * 4; sum += Math.max(D[i], D[i + 1], D[i + 2]); n++; }
+      }
+      return n ? sum / n : 0;
+    },
+    /** 「可领取」标签模板匹配（灰度 SAD）；返回 {ok, score} */
+    labelHit(ctx, tmpl, k) {
+      const cx = MISSION.slotCx[k], pad = MISSION.labelPad, y0 = MISSION.labelY0;
+      const hw = MISSION.labelW / 2;
+      const region = [cx - hw - pad, y0 - 3, cx + hw + pad, y0 + MISSION.labelH + 3];
+      try {
+        const r = ctx.vision.findTemplate(tmpl, region, { step: 1, thresh: MISSION_DONE_SAD });
+        return { ok: !!r.ok, score: (typeof r.score === 'number' ? r.score : 999) };
+      } catch (e) {
+        return { ok: false, score: 999, err: (e && e.message) || String(e) };
+      }
+    },
+    /** 读顶部 3 个槽位状态 → {ok, slots[], done, empty, running, free} */
+    async readSlots(ctx) {
+      let D, W;
+      try { const img = ctx.vision.grab(0); D = img.data; W = img.width; }
+      catch (e) { return { ok: false, why: `取像素失败：${(e && e.message) || e}` }; }
+      let tmpl = null;
+      try { tmpl = await loadMissionKelingquTmpl(); } catch (e) { /* 无模板 → 只分 空缺/占用 */ }
+      const slots = [];
+      for (let k = 0; k < MISSION.slotCx.length; k++) {
+        const st = this.iconStat(D, W, k);
+        if (!this.slotOccupied(D, W, k)) {
+          slots.push({ k, state: 'empty', via: '', v: st.v, s: st.s, sad: -1, glow: 0 });
+          continue;
+        }
+        const glow = this.glowV(D, W, k);
+        const hit = tmpl ? this.labelHit(ctx, tmpl, k) : { ok: false, score: 999 };
+        let state = 'running', via = '';
+        if (hit.ok) { state = 'done'; via = 'sad'; }
+        else if (glow >= MISSION_GLOW_V && glow < MISSION_GLOW_V_MAX) { state = 'done'; via = 'glow'; }
+        slots.push({ k, state, via, v: st.v, s: st.s, sad: hit.score, glow });
+      }
+      const done = slots.filter(o => o.state === 'done').length;
+      const empty = slots.filter(o => o.state === 'empty').length;
+      const running = slots.filter(o => o.state === 'running').length;
+      return {
+        ok: true, slots, done, empty, running,
+        free: done + empty,                                   // 空闲位 = 可领取 + 空缺
+        full: running >= MISSION.concurrency,                 // 满 3 = 三槽全在计时中
+      };
+    },
+    /** 一行摘要，如「可领取 / 计时中 / 空缺」 */
+    fmtSlots(s) {
+      return s.slots.map(o => MISSION_SLOT_TXT[o.state] + (o.via === 'glow' ? '(光晕)' : '')).join(' / ');
+    },
+    /** 明细（V/S/SAD/光晕），排查用 */
+    detail(s) {
+      return s.slots.map(o => `#${o.k + 1}${MISSION_SLOT_TXT[o.state]}` +
+        `(V${o.v.toFixed(0)}/S${o.s.toFixed(0)}` +
+        (o.state === 'empty' ? ')' : ` SAD${o.sad.toFixed(0)}/光晕${o.glow.toFixed(0)})`)).join(' ');
+    },
+
+    // ————— 面板检测（0.5.77：改用面板独有金色按钮，主场景不再误判）—————
+    /** 右下「换一组」金色按钮（集会所面板独有；主场景 / 推荐小队页实测 0 命中） */
+    hangBtnOk(D, W) {
+      const hx = MISSION.hangBtnPt[0], hy = MISSION.hangBtnPt[1];
+      for (let d = -1; d <= 1; d++) {
+        const m = this._mean(D, W, hx + d * 40, hy, 8, 6);
+        if (m.r > 170 && (m.r - m.b) > 90 && m.g > 110) return true;
+      }
+      return false;
+    },
+    /** 面板特征：① 右下「换一组」金按钮 ② 接取按钮金色 ≥2 行（两者任一成立即判在面板）
+     *  ⚠ 0.5.75 的「奖励行 / 槽位图标」两个锚点**已降级为纯日志**：
+     *     主场景（明亮山水）整屏 V≈218/S≈66，会把奖励行和槽位图标全部命中 →
+     *     主场景被误判成「在面板」，挂机时就永远不会触发面板恢复。 */
+    panelAnchors(D, W) {
+      const hangOk = this.hangBtnOk(D, W) ? 1 : 0;
+      let btnOk = 0;
+      for (let r = 0; r < MISSION.btnY.length; r++) if (this.btnAvailable(D, W, r)) btnOk++;
+      let rowsOk = 0;
+      for (let r = 0; r < MISSION.cellY.length; r++) {
+        let n = 0;
+        for (let c = 0; c < MISSION.cellX.length; c++) if (this.hasCell(D, W, MISSION.cellX[c], MISSION.cellY[r])) n++;
+        if (n >= 2) rowsOk++;
+      }
+      let slotOk = 0;
+      for (let k = 0; k < MISSION.slotCx.length; k++) if (this.slotOccupied(D, W, k)) slotOk++;
+      // 0.5.80：panel 收紧 —— **hangOk 不再单独成立**。
+      //   ⚠ 2026-09-11 录制「任务集会所2」实测：点「接取」后的**推荐小队页**、点「推荐小队」后的
+      //     **出发页**，(1171,653) 处同样是金色 → hangOk 命中（推荐小队 (212,181,78) /
+      //     出发页 (207,174,73)），而这两页 btnOk=0。旧式 `panel = hangOk || btnOk>=2`
+      //     会把它们当成面板 → collectDone / keepAlive 在那两页乱点（「点到其他页面」的成因）。
+      //   实测：面板 btnOk=3 / 主场景 0 / 推荐小队页 0 / 出发页 0 —— 余量 3 个按钮。
+      //   也不能改用「换一组」金色本身：把采样块放大到 23x16 后推荐小队页 r-b=116 仍过线。
+      const panel = btnOk >= 2;
+      // 按钮全灰（任务被接完）时 btnOk=0 → 交给 anchorsOf 用「可领取」标签模板复核
+      const needSad = !panel && hangOk === 1;
+      return { hangOk, btnOk, rowsOk, slotOk, panel, needSad, slotSad: -1, hits: (btnOk >= 2 ? 1 : 0) };
+    },
+    /** 取面板锚点（**同步** —— inPanel 依赖它，不能变 async）。
+     *  0.5.80：btnOk<2 但右下金色命中时，再用「可领取」标签模板复核一次：
+     *  该标签是**面板独有**——面板 SAD 11.6（命中）；主场景 48~52 / 推荐小队页 63~107 /
+     *  出发页 63~89 全部不命中（阈值 25，两侧余量各 23）。
+     *  这样「面板 + 3 个接取按钮全灰 + 有可领取任务」仍认得出来，
+     *  而推荐小队页 / 出发页（hangOk 会误命中）被正确排除。 */
+    anchorsOf(ctx) {
+      let D, W;
+      try { const img = ctx.vision.grab(0); D = img.data; W = img.width; }
+      catch (e) { return { panel: false, hangOk: 0, btnOk: 0, rowsOk: 0, slotOk: 0, needSad: false, slotSad: -1, why: 'grab 失败' }; }
+      const a = this.panelAnchors(D, W);
+      if (a.needSad) {
+        if (!_mhKelingquTmpl) { a.why = '可领取模板未加载 → 保守判不在面板'; return a; }
+        let sad = 0;
+        for (let k = 0; k < MISSION.slotCx.length; k++) if (this.labelHit(ctx, _mhKelingquTmpl, k).ok) sad++;
+        a.slotSad = sad;
+        if (sad >= 1) a.panel = true;
+      }
+      return a;
+    },
+    inPanel(ctx) { return this.anchorsOf(ctx).panel; },
+
+    // ————— 弹窗 / 浮层检测（0.5.77）—————
+    /** 「一键领取」确认弹窗：主体区浅米色像素占比
+     *  实测：弹窗 0.74 / 正常面板 0.09~0.14 / 主场景 0.26 / 推荐小队页 0.37 → 阈值 0.55 */
+    popupOpen(D, W) {
+      const x0 = MISSION.popupBox[0], y0 = MISSION.popupBox[1];
+      const x1 = MISSION.popupBox[2], y1 = MISSION.popupBox[3];
+      let pale = 0, n = 0;
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2) {
+          const i = (y * W + x) * 4;
+          const r = D[i], g = D[i + 1], b = D[i + 2];
+          const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+          if (mx > 150 && (mx - mn) < 60) pale++;
+          n++;
+        }
+      }
+      const ratio = n ? pale / n : 0;
+      return { open: ratio > MISSION_POPUP_PALE, ratio };
+    },
+    /** 「恭喜你获得」奖励浮层：面板区亮度骤降（浮层 33 / 正常面板 ≥81 / 主场景 150） */
+    overlayOpen(D, W) {
+      let v = 0, n = 0;
+      for (let y = 80; y < 640; y += 4) {
+        for (let x = 200; x < 1080; x += 4) {
+          const i = (y * W + x) * 4;
+          v += Math.max(D[i], D[i + 1], D[i + 2]); n++;
+        }
+      }
+      const lum = n ? v / n : 0;
+      return { open: lum < MISSION_DARK_LUM, lum };
+    },
+    _probe(ctx) {
+      try { const img = ctx.vision.grab(0); return { D: img.data, W: img.width }; }
+      catch (e) { return null; }
+    },
+    /** 收掉弹窗 / 浮层（最多 3 轮）。返回处理次数，0 = 画面干净 */
+    async clearPopups(ctx) {
+      let acted = 0;
+      for (let i = 0; i < 3; i++) {
+        const pf = this._probe(ctx);
+        if (!pf) break;
+        const pu = this.popupOpen(pf.D, pf.W);
+        if (pu.open) {
+          Utils.log('info', `    🔔 「一键领取」确认弹窗（浅米占比 ${pu.ratio.toFixed(2)}）→ 点「确定」(${MISSION.popupOkBtn.join(',')})`);
+          try { await ctx.op.clickNatural(MISSION.popupOkBtn[0], MISSION.popupOkBtn[1], null, '一键领取-确定'); }
+          catch (e) { Utils.log('warn', `    ⚠ 点「确定」失败：${(e && e.message) || e}`); }
+          acted++;
+          await Utils.sleep(1500);
+          continue;
+        }
+        const ov = this.overlayOpen(pf.D, pf.W);
+        if (ov.open) {
+          const pt = MISSION.overlayPts[Math.min(i, MISSION.overlayPts.length - 1)];
+          Utils.log('info', `    🎉 「恭喜你获得」浮层（亮度 ${ov.lum.toFixed(0)}）→ 点 (${pt.join(',')}) 收起`);
+          try { await ctx.op.clickNatural(pt[0], pt[1], null, '收起奖励展示'); }
+          catch (e) { Utils.log('warn', `    ⚠ 收起浮层失败：${(e && e.message) || e}`); }
+          acted++;
+          await Utils.sleep(1200);
+          continue;
+        }
+        break;
+      }
+      return acted;
+    },
+
+    /** 领取所有已完成任务（槽位「可领取」）→ 返回本轮领取数
+     *  ⚠ 助手内部点击一律用 clickNatural，不走 ctx.tap ——
+     *    tap 会 _advance 流程图索引，而本任务每轮都重展开流程图并由 run 显式 ctx.step()，
+     *    助手内部点数不定，走 tap 会把索引顶飞、流程图与 run 阶段对不上。
+     *  0.5.77：补上「多个可领取 → 一键领取确认弹窗 → 恭喜你获得浮层」两步。
+     *    0.5.77 真机录制证实：点任一「可领取」槽位图标 → 先弹确认框（「确定」(519,451)），
+     *    再弹奖励浮层（点 (528,457) 收起）。旧实现只点图标就回头读槽位，
+     *    读到的是「被浮层盖住」的画面 → 槽位被误判成空/计时中，等于白领。 */
+    async collectDone(ctx) {
+      let tmpl = null;
+      try { tmpl = await loadMissionKelingquTmpl(); }
+      catch (e) { Utils.log('warn', `    「可领取」模板加载失败：${(e && e.message) || e}`); }
+      let got = 0;
+      for (let round = 0; round < MISSION.concurrency; round++) {
+        await Runtime.check();
+        const s = await this.readSlots(ctx);
+        if (!s.ok) { Utils.log('warn', `    ⚠ 读槽位失败：${s.why}`); break; }
+        const idx = s.slots.findIndex(o => o.state === 'done');
+        if (idx < 0) {
+          if (round === 0) Utils.log('info', `    （顶部无可领取：${this.fmtSlots(s)}）`);
+          break;
+        }
+        const cx = MISSION.slotCx[idx];
+        await this.clearPopups(ctx);   // 保证这一帧是真实面板，不是残留浮层
+        let s2 = null, via = '';
+        for (const pair of [[MISSION.slotIconCy, '图标'], [MISSION.slotLabelCy, '标签']]) {
+          const cy = pair[0], tag = pair[1];
+          Utils.log('info', `    🎁 槽位 ${idx + 1}「可领取」(SAD${s.slots[idx].sad.toFixed(0)}) → 点${tag} (${cx},${cy})`);
+          try { await ctx.op.clickNatural(cx, cy, null, '领取奖励(' + tag + ')'); }
+          catch (e) { Utils.log('warn', `    ⚠ 领取点击异常：${(e && e.message) || e}`); break; }
+          await Utils.sleep(1200);
+          // 多个可领取 → 确认弹窗；领取成功 → 奖励浮层。两步都在这里吸收掉。
+          await this.clearPopups(ctx);
+          await Utils.sleep(1000);
+          s2 = await this.readSlots(ctx);
+          if (s2.ok && s2.slots[idx].state !== 'done') { via = tag; break; }
+          if (!this.inPanel(ctx)) {
+            Utils.log('warn', '    ⚠ 点完后面板已不在（可能还有没收起的浮层）→ 本任务停手');
+            break;
+          }
+        }
+        if (s2 && s2.ok && s2.slots[idx].state !== 'done') {
+          got++;
+          Utils.log('info', `    ✓ 已领取（**${via}落点生效**，槽位 ${idx + 1} → ${MISSION_SLOT_TXT[s2.slots[idx].state]}）`);
+          continue;
+        }
+        Utils.log('warn', `    ⚠ 槽位 ${idx + 1} 点图标/标签后仍显示「可领取」→ 本轮停手不再点（请回传这条日志以便定正确落点）`);
+        break;
+      }
+      if (!got) Utils.log('info', '    （本轮没有可领取的任务）');
+      await this.clearPopups(ctx);   // 领完再清一次，免得浮层残留影响后面的接取判定
+      return got;
+    },
+
+    /** 按顶部槽位空闲数补接红/蓝宝箱任务（不用「换一组」）→ 返回本轮接取数 */
+    async acceptQualifying(ctx) {
+      const s = await this.readSlots(ctx);
+      if (!s.ok) { Utils.log('warn', `    ⚠ 读槽位失败：${s.why}`); return 0; }
+      Utils.log('info', `    📋 顶部槽位：${this.fmtSlots(s)} → 空闲 ${s.free}/${MISSION.concurrency}` +
+        `（可领取 ${s.done} + 空缺 ${s.empty}），在跑 ${s.running}`);
+      Utils.log('debug', `       ${this.detail(s)}`);
+      const room = MISSION.concurrency - s.running;   // 还能再派遣几个 = 空闲位数
+      if (room <= 0) {
+        Utils.log('info', '    🈵 3 个槽位**全部计时中**（既无可领取、也无空缺）→ 判为满 3，本轮不接');
+        return 0;
+      }
+      Utils.log('info', `    ✅ 顶部空闲 ${room} 位 → 本轮最多再接 ${room} 个红/蓝宝箱任务`);
+      let got = 0;
+      while (got < room) {
+        await Runtime.check();
+        let D, W;
+        try { const img = ctx.vision.grab(0); D = img.data; W = img.width; } catch (e) { break; }
+        if (!this.inPanel(ctx)) { Utils.log('warn', '    面板已离开（接取后未返回），本轮提前结束'); break; }
+        // 同轮里红优先于蓝（红的更珍贵；两者都在允许清单内）
+        let pick = null;
+        for (let r = 0; r < MISSION.btnY.length; r++) {
+          if (!this.btnAvailable(D, W, r)) continue;
+          const t = this.chestType(D, W, r);
+          if (t !== 'red' && t !== 'blue') continue;
+          if (!pick || (t === 'red' && pick.t === 'blue')) pick = { r, t };
+          if (pick.t === 'red') break;
+        }
+        if (!pick) { Utils.log('info', '    🔍 当前候选里没有可接的红/蓝宝箱任务'); break; }
+        const which = pick.t === 'red' ? '红' : '蓝';
+        Utils.log('info', `    ✅ 接取第 ${pick.r + 1} 行（${which}宝箱）`);
+        try {
+          await ctx.op.clickNatural(MISSION.btnX, MISSION.btnY[pick.r], null, '接取任务');
+          await Utils.sleep(1400);   // 弹出「选择小队」面板
+          await ctx.op.clickNatural(MISSION.acceptBtn[0], MISSION.acceptBtn[1], null, '推荐小队');
+          await Utils.sleep(1000);
+          await ctx.op.clickNatural(MISSION.launchBtn[0], MISSION.launchBtn[1], null, '出发');
+          await Utils.sleep(1800);   // 等派遣动画 + 面板回落
+        } catch (e) {
+          Utils.log('warn', `    ⚠ 接取流程点击中断：${(e && e.message) || e}`);
+          break;
+        }
+        got++;
+      }
+      return got;
+    },
+
+    /** 分片可中断睡眠（长挂机时用户点停止能立刻响应） */
+    async sleepInterruptible(ms) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        await Runtime.check();
+        await Utils.sleep(Math.min(5000, ms - (Date.now() - t0)));
+      }
+    },
+
+    /** 打开集会所面板：回主界面 → 两段拖动 → 点入口；
+     *  失败则**回主界面 → 换备用拖动高度重拖 → 点备用落点**。
+     *  0.5.80：拖动高度改用**真机录制实测的 y=282**（依据见 MISSION.swipeY 注释）；
+     *          两段之间的等待 1s → 1.6s（录制里两步间隔 1.65s，滑动惯性动画需要时间）；
+     *          首轮失败后先回主界面再重试（否则第二段拖动可能落在非主场景页面上）。
+     *  ⚠ 全程走底层 op/nav API（不推进流程图索引），调用方需自行 ctx.step()。 */
+    async openPanel(ctx) {
+      Utils.log('info', '    ▶ 回主界面 → 两段拖动 → 点开「任务集会所」');
+      try { await ctx.nav.goHome(); }
+      catch (e) { Utils.log('warn', `    ⚠ goHome 失败：${(e && e.message) || e}`); }
+      const drag = async (y) => {
+        await ctx.op.swipe(325, y, 1117, y, 532);
+        await Utils.sleep(1600);
+        await ctx.op.swipe(301, y, 1017, y, 692);
+        await Utils.sleep(1600);
+      };
+      try {
+        await drag(MISSION.swipeY);
+        await ctx.op.clickNatural(MISSION.entry[0], MISSION.entry[1], null, '打开集会所');
+      } catch (e) { Utils.log('warn', `    ⚠ 进面板操作异常：${(e && e.message) || e}`); }
+      await Utils.sleep(1800);   // 面板开启动画
+      if (this.inPanel(ctx)) return true;
+      Utils.log('warn', `    ⚠ 拖动 y=${MISSION.swipeY} + 入口 (${MISSION.entry.join(',')}) 没打开面板 → ` +
+        `回主界面后换备用拖动 y=${MISSION.swipeYAlt} + 备用落点 (${MISSION.entryAlt.join(',')})`);
+      try {
+        await ctx.nav.goHome();
+        await Utils.sleep(800);
+        await drag(MISSION.swipeYAlt);
+        await ctx.op.clickNatural(MISSION.entryAlt[0], MISSION.entryAlt[1], null, '打开集会所(备用)');
+      } catch (e) { /* ignore */ }
+      await Utils.sleep(1800);
+      return this.inPanel(ctx);
+    },
+
+    /** 面板内保活：防云游戏长时间无操作超时断连。
+     *  奇数次轻点面板底部空白；偶数次单向短滑 96px —— 点击/滑动两种输入都覆盖，
+     *  避免某种事件不被云游戏客户端认作「有效操作」。
+     *  两者都是**单个**操作（不再「滑出再滑回」，否则两次滑之间会多出一个 <1s 间隔，
+     *  违反「任何操作间隔 ≥1s」的口径）。
+     *  落点 (360,672) 在面板底部空白处：左下「返回」在 x≤140，右下「换一组」在 x≥1097。 */
+    async keepAlive(ctx, n) {
+      try {
+        if (n % 2 === 1) {
+          await ctx.op.clickNatural(MISSION.keepAlivePt[0], MISSION.keepAlivePt[1], null, '集会所保活');
+          Utils.log('debug', `    💤 保活 #${n}：轻点 (${MISSION.keepAlivePt.join(',')})`);
+        } else {
+          const x1 = MISSION.keepAliveDrag[0], y1 = MISSION.keepAliveDrag[1];
+          const x2 = MISSION.keepAliveDrag[2], y2 = MISSION.keepAliveDrag[3];
+          await ctx.op.swipe(x1, y1, x2, y2, 300);
+          Utils.log('debug', `    💤 保活 #${n}：短滑 (${x1},${y1})→(${x2},${y2})`);
+        }
+      } catch (e) { Utils.log('warn', `    ⚠ 保活操作异常：${(e && e.message) || e}`); }
+      await Utils.sleep(1000);
+    },
+
+    /** 面板丢失后的恢复：先收弹窗/浮层，仍不在面板就回主界面重开。返回是否已回到面板 */
+    async recover(ctx) {
+      await this.clearPopups(ctx);
+      if (this.inPanel(ctx)) return true;
+      return await this.openPanel(ctx);
+    },
+
+    /** 在集会所面板内挂机 totalMs：每 keepAliveMin 分钟做一次保活操作，顺带检查面板是否还在。
+     *  0.5.77：**不回主界面** —— 用户口径「挂机可以直接在任务集会所界面挂机，到时间就可以直接识别」。
+     *  但云游戏长时间无操作会超时断连，所以按固定节奏续期。
+     *  ⚠ **0.5.81 起不再调用**：用户实测面板内的轻点/短滑**仍被判「无操作」超时** →
+     *  改为 `sleepAtHome`（回主界面等待 + 下轮重新进场）。保留此方法仅为回滚方便。 */
+    async sleepInPanel(ctx, totalMs) {
+      const KA = MISSION.keepAliveMin * 60000;
+      let left = totalMs, n = 0;
+      while (left > 0) {
+        const seg = Math.min(left, KA);
+        await this.sleepInterruptible(seg);
+        left -= seg;
+        if (left <= 0) break;
+        await Runtime.check();
+        n++;
+        // 动手前先确认真在面板：万一被弹窗/浮层盖住，先收干净再点，避免点在弹窗按钮上
+        const acted = await this.clearPopups(ctx);
+        if (this.inPanel(ctx)) {
+          await this.keepAlive(ctx, n);
+        } else {
+          Utils.log('warn', `    ⚠ 挂机第 ${n} 次检查：已不在集会所面板${acted ? '（刚清过弹窗）' : ''} → 尝试恢复`);
+          const back = await this.recover(ctx);
+          if (!back) Utils.log('warn', '    ⚠ 面板恢复失败，本轮剩余时间不再折腾（下轮重来）');
+        }
+      }
+      Utils.log('debug', `    ⏱ 面板内挂机结束（期间保活 ${n} 次）`);
+    },
+
+    /** 0.5.81：**回主界面 → 原地等 totalMs → 下一轮重新进场**（用户 2026-09-20 口径）。
+     *  背景：旧做法是在集会所面板里挂机、每 3 分钟轻点/短滑保活 —— 用户实测
+     *  「左右滑动这样不行，还是被判定为无操作而超时」。
+     *  现在改成在两个界面之间来回切换：每轮领完/接完就回主界面，等 pollMin 分钟再拖屏进面板。
+     *  ⚠ 等待期间**刻意不做任何操作**：主界面上的拖动会移动镜头，下一轮 openPanel 的
+     *     两段拖屏坐标（325→1117 / 301→1017）就会偏，反而进不去面板。
+     *  返回：是否**确认**回到了主界面（goHome 每轮截图识别场景；没确认也不要紧，
+     *        下一轮进场前还会再 goHome 一次）。 */
+    async sleepAtHome(ctx, totalMs) {
+      let atHome = false;
+      try {
+        await this.clearPopups(ctx);            // 先把战后/浮层残留收掉，免得盖住主界面识别
+        atHome = !!(await ctx.nav.goHome());
+      } catch (e) { Utils.log('warn', `    ⚠ 回主界面异常：${(e && e.message) || e}`); }
+      if (atHome) Utils.log('info', '    🏠 已回主界面');
+      else Utils.log('warn', '    ⚠ 未确认回到主界面（下一轮进场前会再试一次）');
+      await this.sleepInterruptible(totalMs);
+      return atHome;
+    },
+  };
+
+  // ── 招财（collectGold）时序参数 ────────────────────────────────────────────
+  /** 两次「免费招财」点击之间的间隔（ms）。
+   *  0.5.76：0.5s → 2s。0.5s 太快，第 2 次点击容易落在第 1 次的招财动画里而没被记上。
+   *  要再调就改这里。 */
+  const GOLD_FREE_GAP_MS = 2000;
+
   const TASK_DEFS = [
 
     // ————— 每日收获 —————
     {
       key: 'collectGold', name: '招财', category: 'collect',
       /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应）
-       *  2026-09-13 用户口径：**不再做视觉识别**——打开招财页后默认直接点 2 次「免费招财」位 (830,555)，
-       *  两次间隔 0.5s。（此前先按探针 goldFreeText/goldDone 判定就绪与免费态再点，真机上不稳定） */
+       *  2026-09-13 用户口径：**不再做视觉识别**——打开招财页后默认直接点 2 次「免费招财」位 (830,555)。
+       *  2026-09-19：两次间隔 0.5s → GOLD_FREE_GAP_MS(2s)。用户反馈 0.5s 太快、第 2 次点击容易没被记上
+       *  （"太快了，怕少点"）。（更早还试过用探针 goldFreeText/goldDone 判定就绪与免费态，真机上不稳定） */
       steps: [
         { kind: 'tap', title: '打开招财页', detail: '点主界面顶部「招财」入口 (762,44)，等页面加载', coord: [COORDS.collect.goldEntry.x, COORDS.collect.goldEntry.y], color: '88,166,255' },
         { kind: 'tap', title: '免费招财 #1', detail: '不做识别，直接点 (830,555)', coord: [830, 555], color: '126,231,135' },
-        { kind: 'tap', title: '免费招财 #2', detail: '间隔 0.5s 后再点 (830,555)', coord: [830, 555], color: '126,231,135' },
+        { kind: 'tap', title: '免费招财 #2', detail: '等 2s（GOLD_FREE_GAP_MS）后再点 (830,555)', coord: [830, 555], color: '126,231,135' },
         { kind: 'tap', title: '返回主界面', detail: '点右上「返回」按钮 (1087,118)', coord: [COORDS.collect.goldBack.x, COORDS.collect.goldBack.y], color: '248,81,73' },
         { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景（最多 6 轮）', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go(COORDS.collect.goldEntry, null, '打开招财页');
-        // 2026-09-13 用户口径：不做识别，直接点 2 次「免费招财」位 (830,555)，两次间隔 0.5s。
-        //   这里用底层 clickNatural + 显式 sleep，而不用 ctx.tap ——
-        //   ctx.tap 收尾会走 delay.click 的 ≥1s 下限，间隔就不是 0.5s 了。
+        // 不做识别，直接点 2 次「免费招财」位 (830,555)。
+        //   这里用底层 clickNatural + 显式 sleep，而不用 ctx.tap —— ctx.tap 收尾会走
+        //   delay.click 区间，间隔不可控。
         //   0.5.52：按用户要求拆成「免费招财 #1 / #2」两个流程图步骤（"做成两步"）。
+        //   0.5.76：0.5s → GOLD_FREE_GAP_MS(2s)。0.5s 时第 2 次点击常落在第 1 次的招财动画
+        //     /按钮刷新窗口里而**没被记上**（用户："太快了，怕少点"）。
         const GOLD_FREE_X = 830, GOLD_FREE_Y = 555;
         for (let i = 1; i <= 2; i++) {
           ctx._advance('免费招财 #' + i);
-          if (i > 1) await Utils.sleep(500);   // 两次招财间隔 0.5s（用户指定）
+          if (i > 1) {
+            Utils.log('info', `    ⏳ 等 ${GOLD_FREE_GAP_MS}ms 后点第 2 次招财`);
+            await Utils.sleep(GOLD_FREE_GAP_MS);
+          }
           try {
             await ctx.op.clickNatural(GOLD_FREE_X, GOLD_FREE_Y, null, '免费招财#' + i);
             Utils.log('info', `    💰 免费招财 ${i}/2 @(${GOLD_FREE_X},${GOLD_FREE_Y})`);
@@ -3129,7 +4185,7 @@
           }
           ctx.stepResult(true);
         }
-        await Utils.sleep(500);   // 等招财动画/按钮刷新后再返回
+        await Utils.sleep(1000);   // 等招财动画/按钮刷新后再返回
         await ctx.tap(COORDS.collect.goldBack, null, '返回主界面');
         await ctx.home();
 
@@ -3151,7 +4207,7 @@
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go(COORDS.collect.mailEntry);
         await ctx.tap(COORDS.collect.mailAll);
-        await Utils.sleep(500);   // 一键领取 → 一键删除 之间加 0.5s：等领取弹窗/列表刷新，避免连点太快漏掉删除
+        await Utils.sleep(1000);   // 一键领取 → 一键删除 之间加 0.5s：等领取弹窗/列表刷新，避免连点太快漏掉删除
         await ctx.tap(COORDS.collect.mailDelete);
         await ctx.tap(COORDS.collect.mailConfirm);
         await ctx.home();
@@ -3199,7 +4255,7 @@
         };
 
         let pos = tryMatch('原样');
-        if (!pos) { await Utils.sleep(900); pos = tryMatch('复检'); }
+        if (!pos) { await Utils.sleep(1000); pos = tryMatch('复检'); }
         if (!pos) {
           // 菜单可能被滚动过：先向下拖（内容下移，露出上面的项）
           Utils.log('info', '    ↕ 未命中 → 菜单下拖后重试');
@@ -3266,27 +4322,8 @@
           else {
             // 兜底 2：仍按游戏画面层点一次（若该弹窗其实在画面内）
             await ctx.op.clickNatural(866, 204, null, '关奖励弹窗(游戏层兜底)');
-            await Utils.sleep(800);
+            await Utils.sleep(1000);
           }
-        }
-        await ctx.home();
-
-      }
-    },
-
-    {
-      key: 'collectIntel', name: '情报社', category: 'collect',
-      /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应） */
-      steps: [
-        { kind: 'tap', title: '打开情报社', detail: '点「情报社」入口', coord: [COORDS.collect.intelBtn.x, COORDS.collect.intelBtn.y], color: '88,166,255' },
-        { kind: 'tap', title: '领取情报 ×3', detail: '纵向 +80px 连点 3 次（坐标为首点 y，依次 +80）', coord: [COORDS.collect.intelBtn.x, COORDS.collect.intelBtn.y], color: '126,231,135' },
-        { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景', coord: null, color: '188,140,255' },
-      ],
-      async run(ctx) {
-        await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
-        await ctx.go(COORDS.collect.intelBtn);
-        for (let i = 0; i < 3; i++) {
-          await ctx.tap([COORDS.collect.intelBtn.x, COORDS.collect.intelBtn.y + i * 80]);
         }
         await ctx.home();
 
@@ -3300,16 +4337,21 @@
         { kind: 'drag', title: '主场景拖到最左（第一次）', detail: '横向匀速拖动 x 173→1589，y=360（见 COORDS.collect.rankDrags）', coord: null, color: '88,166,255' },
         { kind: 'drag', title: '主场景拖到最左（第二次）', detail: '横向匀速拖动 x 211→1196，y=360（见 COORDS.collect.rankDrags）', coord: null, color: '88,166,255' },
         { kind: 'tap', title: '打开排行榜', detail: '点「排行榜」入口', coord: [COORDS.collect.rankEntry.x, COORDS.collect.rankEntry.y], color: '88,166,255' },
-        { kind: 'tap', title: '点赞', detail: '点「点赞」按钮', coord: [COORDS.collect.rankLike.x, COORDS.collect.rankLike.y], color: '126,231,135' },
+        { kind: 'tap', title: '点赞', detail: '点「点赞」按钮；与上一步间隔 ≥2s（等榜单加载）', coord: [COORDS.collect.rankLike.x, COORDS.collect.rankLike.y], color: '126,231,135' },
         { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
+        // 0.5.76（用户反馈）：拖动/开页后立刻进行下一步，遇到加载延迟会点错位置 → 每步之间都补足间隔。
+        //   ctx.drag / ctx.go / ctx.tap 自身收尾已有 delay.click(≥1s)，这里再按步骤补一段显式等待。
         for (const d of COORDS.collect.rankDrags) {
           await ctx.drag([d.x1, 360, d.x2, 360], null, null, null, 600, '主场景拖到最左');
+          await Utils.sleep(1000);   // 等镜头滑停落位，再拖下一次
         }
         await ctx.go(COORDS.collect.rankEntry);
+        await Utils.sleep(2000);     // 排行榜页加载（榜单刷出 + 展开动效）
         await ctx.tap(COORDS.collect.rankLike);
+        await Utils.sleep(1500);     // 等点赞动效播完，再回主界面
         await ctx.home();
 
       }
@@ -3421,7 +4463,7 @@
         };
 
         let pos = tryMatch('原样');
-        if (!pos) { await Utils.sleep(900); pos = tryMatch('复检'); }
+        if (!pos) { await Utils.sleep(1000); pos = tryMatch('复检'); }
         // 2026-09-14 新增第二识别路径：白色文字行聚类。
         //  背景：云端视频流 720p→1080p，文字重采样抗锯齿变化，SAD 模板分 0→~29 卡死在阈值 25
         //  （现场帧实测 28.7，位置完全正确仍判未命中）。findTextRows 只认「灰度>170 且低饱和的白字行」，
@@ -3535,7 +4577,7 @@
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go([60, 211], null, '打开体力页');
-        await Utils.sleep(500);   // 第1→2 步：等体力页弹窗加载完再点「一键领取」
+        await Utils.sleep(1000);   // 第1→2 步：等体力页弹窗加载完再点「一键领取」
         await ctx.tap([521, 589], null, '一键领取');
         await Utils.sleep(1500);  // 第2→3 步【本次修复】：等「一键领取」的确认弹窗刷出后再点确认
                                   //   此前该处无延时（背靠背点击），确认按钮还没渲染 → 点击落空
@@ -3760,6 +4802,16 @@
           await Utils.sleep(3000);   // BOSS 页加载（录制间隔 ~3s）
         };
 
+        // 等「某场景消失」：用于关结算后确认结算页已切走，再点下一把/退出
+        const waitSceneGone = async (s, timeout) => {
+          const t0 = Date.now();
+          while (Date.now() - t0 < timeout) {
+            if (ctx.scenes.detect(false).scene !== s) return true;
+            await Utils.sleep(1000);
+          }
+          return false;
+        };
+
         for (let round = 1; round <= rounds; round++) {
           const rec = Store.get('na_squadRaid', { week: '', count: 0 });
           const weekCount = (rec.week === weekKey) ? (rec.count || 0) : 0;
@@ -3805,7 +4857,7 @@
             if (!hit) break;
             ctx.step('勾选本周不再提示'); ctx.stepResult(true);
             await ctx.tap([575, 485], null, '勾选本周不再提示');
-            await Utils.sleep(500);
+            await Utils.sleep(1000);
             ctx.step('继续出战'); ctx.stepResult(true);
             await ctx.tap([529, 412], null, '继续出战');
             await Utils.sleep(2000);
@@ -3815,12 +4867,19 @@
           const reason = await ctx.fight({ noHome: true });
 
           // ——— 关结算：结算页「点击任意位置关闭界面」，录制实测点 (1041,166)。
-          // 超时（还在战斗中）时不点，避免打到战斗画面右上 HUD；
-          // 若结算已被辅助提前点掉（reason='stable'），这一点落在 BOSS 页立绘上，无害。
+          // 0.5.69 修正： fight 可能因静止/超时提前返回，此时结算屏还没出来；
+          // 必须先等 BATTLE_END（squadVictory 等结算探针）真正出现，再点关闭，
+          // 并且点完后等结算页消失，否则下一把「挑战」会点在结算页上。
           if (reason !== 'timeout') {
-            ctx.step('关闭战斗结算'); ctx.stepResult(true);
-            await ctx.tap([1041, 166], null, '关闭战斗结算');
-            await Utils.sleep(2000);
+            const settleShown = await ctx.scenes.waitFor(SCENE.BATTLE_END, 3500);
+            if (settleShown) {
+              ctx.step('关闭战斗结算'); ctx.stepResult(true);
+              await ctx.tap([1041, 166], null, '关闭战斗结算');
+              // 等结算页消失，避免「挑战/退出」点错
+              await waitSceneGone(SCENE.BATTLE_END, 3500);
+            } else {
+              Utils.log('warn', '⚔️ 结算屏未在 3.5s 内出现，不点关闭（避免在战斗/房间页乱点）');
+            }
           } else {
             Utils.log('warn', '⚔️ 战斗超时，跳过结算关闭');
           }
@@ -3829,12 +4888,12 @@
           Utils.log('info', `⚔️ 小队突袭 第 ${round}/${rounds} 场完成（${reason}）`);
         }
 
-        // 全部打完 → 右上红✕ 退回主界面（录制实测 (1215,32)；无弹窗时该点在主界面左上空白，无害）
+        // 全部打完 → 用 ctx.home() 稳健回主界面。0.5.69 修正：
+        // 固定红✕ (1215,32) 在房间页/匹配页会误点成「挑战/进入」，导致默认开第三把，
+        // 改用 goHome 走场景识别 + 盲按返回，不再依赖单一坐标。
         const sc = ctx.scenes.detect(false).scene;
         if (sc !== SCENE.HOME) {
           ctx.step('退出小队突袭'); ctx.stepResult(true);
-          await ctx.tap([1215, 32], null, '退出小队突袭（红✕）');
-          await Utils.sleep(1500);
           await ctx.home();
         }
         Utils.log('info', `⚔️ 小队突袭全部完成（${rounds} 场）`);
@@ -3876,17 +4935,17 @@
 
         // ——— 组织助战 → 我的助战 → 领取 ———
         await ctx.tap([1013, 661], null, '组织助战');
-        await Utils.sleep(800);
+        await Utils.sleep(1000);
         await ctx.tap([885, 649], null, '我的助战');
-        await Utils.sleep(800);
+        await Utils.sleep(1000);
         await ctx.tap([681, 587], null, '领取助战收益');
         await Utils.sleep(1500);   // 领取动画 / 收益数字刷新
 
         // ——— 收尾：关两层面板 → 若有「离开队伍」确认框点确定 → 回主界面 ———
         await ctx.tap([1221, 33], null, '关闭助战忍者页');
-        await Utils.sleep(800);
+        await Utils.sleep(1000);
         await ctx.tap([1225, 33], null, '关闭小队突袭页');
-        await Utils.sleep(800);
+        await Utils.sleep(1000);
         // 录制里此处必有弹窗；实际没有时 (649,448) 打在角色立绘上（实测 RGB 50,59,56）无副作用，
         // 因此不写条件分支，避免"弹窗在但场景没识别出来 → 跳过 → 卡住"。
         await ctx.tap([649, 448], null, '确定离开队伍');
@@ -3918,11 +4977,11 @@
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.drag([974, 360, 227, 360], null, null, null, 497, '主场景拖到最左');
-        await Utils.sleep(800);    // 录制间隔 1.34s（含拖拽时长，补足）
+        await Utils.sleep(1000);    // 录制间隔 1.34s（含拖拽时长，补足）
         await ctx.drag([1013, 360, 246, 360], null, null, null, 569, '主场景拖到最左');
-        await Utils.sleep(600);    // 录制间隔 1.14s
+        await Utils.sleep(1000);    // 录制间隔 1.14s
         await ctx.go([569, 145], null, '打开生存试炼');
-        await Utils.sleep(900);    // 录制间隔 1.39s
+        await Utils.sleep(1000);    // 录制间隔 1.39s
         await ctx.tap([881, 334], null, '选生存挑战');
         await Utils.sleep(1700);   // 录制间隔 2.22s
         await ctx.tap([889, 660], null, '点重置');
@@ -3930,11 +4989,11 @@
         await ctx.tap([655, 448], null, '确认重置');
         await Utils.sleep(2000);   // 录制间隔 2.46s
         await ctx.tap([767, 645], null, '开始扫荡');
-        await Utils.sleep(800);    // 录制间隔 1.28s
+        await Utils.sleep(1000);    // 录制间隔 1.28s
         await ctx.tap([769, 647], null, '再点开始扫荡');
-        await Utils.sleep(800);    // 录制间隔 1.32s
+        await Utils.sleep(1000);    // 录制间隔 1.32s
         await ctx.tap([641, 596], null, '准备就绪');
-        await Utils.sleep(600);    // 录制间隔 1.07s
+        await Utils.sleep(1000);    // 录制间隔 1.07s
         await ctx.tap([639, 464], null, '出战名单确定');
         await Utils.sleep(1000);   // 录制间隔 1.51s
         await ctx.tap([508, 457], null, '扫荡券确认');
@@ -3947,61 +5006,200 @@
 
     {
       key: 'arenaBattle', name: '角斗场忍术对战', category: 'battle', timeout: 5400000,
-      /** 2026-09-13 改（用户口径 + 忍术对战3.json 107 帧实测）：
-       *  · **一局 = 一次「胜负已分」金色横幅**（识别到即计一局）。横幅实测显示约 10s，
-       *    其后紧跟一次黑屏转场（全屏均值 1.3~4.4，战斗中最暗帧也有 43，不会混）。
-       *  · 一局打完**不回主界面**：实测黑屏后游戏会**自动**开下一局 —— 这时脚本什么都不点，
-       *    继续按住普攻即可；只有没自动续局时才按用户口径重复点
-       *    「选对手 (306,635) → 开始对战 (1173,608)」。省掉了原来每轮的 goHome + 拖屏 + 进入口。
-       *  · 普攻改成一直按住（battle.holdAttack），详见 combatStep。 */
+      /** 角斗场忍术对战
+       *  2026-09-19 重写（用户 trace「忍术对战一场」1020 帧实证 + 反馈「战斗中过一会儿就不按键」）：
+       *  · 一场 = 若干小局，**每个小局结束都弹一次「胜负已分」金色横幅**（实测只显示 0.3~1s，
+       *    trace #335/336、#568/569 各只采到 2 拍 → 旧「连续 3 拍」条件必漏判）。
+       *  · 横幅后紧跟黑屏过场：①自动续下一小局（画面重新动起来）或 ②整场打完（→ 战绩/评测/入口页）。
+       *    旧实现识别到横幅就 return，再由本任务固定 sleep(10s)+3s → 自动续局时新小局开局约 13s
+       *    不出手（用户看到「打一会儿就不按键了」）。现在改为 waitForEnd 的**观察窗**（bannerGraceMs）：
+       *    横幅后 6s 内画面恢复动态 → 直接接着连招，不出任务层、不空窗。
+       *  · 开局 40s 内不许用「画面静止」判结束：忍术对战「双方登场」画面实测静止 4.5s 以上
+       *    （trace #42~#62 连续 21 帧完全不动），否则会「开局 15s 判打完 → 空窗 10s → 开打时不出手」。
+       *  · 不认「失败」探针：失败页配色与「双方登场」暗背景几乎同色（d=16~24，tol=25），
+       *    trace #42~#62 连续 21 帧全部误命中 → 假结束；战败小局改由「静止 2.4s」兜底判结束。
+       *  · 单场连招上限 150s → 5min（实测一局含自动续局会长达 149s，贴脸会被截断）。
+       *  · 普攻一直按住（battle.holdAttack），详见 combatStep。
+       *
+       *  2026-09-19 二次实测（trace 2026-09-19T13-35-52，2000 拍 / 21.7 分钟只打完 5 局）：
+       *  · 一局（整场）打完，游戏会连弹「胜负已分 → 战斗结果(战绩) → 黑屏 → 奖励浮层 →
+       *    **任务/奖励面板**」一串页面。旧实现既不认识也不清，只按固定两点盲点
+       *    「选对手/挑战 + 开始对战」—— 点不到就继续盲点。实测脚本在黑屏那两拍还在点，
+       *    **面板就是这么被点开的**；之后整场卡在面板上（3 局各卡 377s）。
+       *  · 卡住的直接机制：waitForEnd 的 battleStarted 闸（0.5.72）只认「先看到过动态帧」，
+       *    一旦开局就落在静止的陌生页面，battleStarted 永远 false →「静止 = 打完」这条唯一
+       *    出口被永久关掉 → 盲点到 maxWaitMs(360s)。
+       *  · 0.5.79 三层修：① waitForEnd 新增 staticBailMs（连续静止 ≥20s 无条件兜底结束）；
+       *    ② combatStep 黑屏(LOADING)期间不点；③ 本任务每一步都做「点完看画面变没变」的自检，
+       *    没反应就试点候选确定/关闭/返回解卡，还不行回主界面重进；连续失败就停手报错。
+       *
+       *  0.5.81 三次实测（同一份 trace，用户 2026-09-20 反馈「7m32s~7m33s 战斗结束没识别到」）：
+       *   ① **整场结束的快通道**：全屏黑过场（BR<12）在战斗中**不可能**出现 ——
+       *      实测战斗中 BR≥100、「小局切换」的暗帧 14.0~22.3（不是全屏黑），
+       *      而整场结束的暗帧 1.3~5.3。于是新增 opts.darkEndAfterMs（本任务传 25s 时间闸，
+       *      排除开局进战斗的加载黑屏）→ 命中即 return 'darkend'，放在所有闸之前。
+       *      旧实现只在 scene=BATTLE_END 时才拿黑屏做序列确认，而黑屏后画面停在结算/面板页
+       *      → 判不出 BATTLE_END → 整条路走空，只能靠 20s 静止兜底（晚 6s 以上）。
+       *   ② **「点得动吗」的判据 0.012 → 0.05**：卡在战后页面时，画面自身就有 0.010~0.015 的
+       *      轻微动画，用默认阈值会把「盲点」判成「点到了」，于是脚本以为选对手/开始对战生效、
+       *      一路盲点下去。真点到东西时 diff≈0.16 → 取 0.05，两侧余量都 >3 倍。
+       *   ③ **战后只要不是靠横幅正常收尾，就直接回主界面重进**（不再让下一轮去猜页面、
+       *      也不再逐个试 8 个解卡落点 —— 那些点击本身就可能在面板上乱点）。 */
       steps: [
         { kind: 'drag', title: '主场景拖到最右（第一次）', detail: '横向匀速拖动 x 423→1357，y=360（仅第一局前走一次）', coord: null, color: '88,166,255' },
         { kind: 'drag', title: '主场景拖到最右（第二次）', detail: '横向匀速拖动 x 263→1287，y=360', coord: null, color: '88,166,255' },
         { kind: 'tap', title: '打开角斗场', detail: '点「忍术对战」入口 (974,357)', coord: [974, 357], color: '88,166,255' },
         { kind: 'tap', title: '选对手/挑战', detail: '点 (315,637)；未自动续局时才重复这一步', coord: [315, 637], color: '126,231,135' },
         { kind: 'tap', title: '开始对战', detail: '点 (1165,629)', coord: [1165, 629], color: '210,153,34' },
-        { kind: 'check', title: '打完一局（识别「胜负已分」）', detail: '按住普攻 + 5s 轮询技能；识别到金色横幅 / 黑屏序列 = 本局打完', coord: null, color: '248,81,73' },
-        { kind: 'check', title: '等结算过场走完（房间页）', detail: '0.5.65：等 SCENE.DAILY 房间页出现才算这一把彻底结束（约 9s 过场）', coord: null, color: '188,140,255' },
-        { kind: 'check', title: '续下一局（不回主界面）', detail: '房间页 → 点选对手→开始对战；已自动续局则直接进下一轮', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '打完一小局（识别「胜负已分」）', detail: '按住普攻 + 5s 轮询技能；金色横幅单拍强命中 或 连续 2 拍 = 落判（横幅只显示 0.3~1s）', coord: null, color: '248,81,73' },
+        { kind: 'check', title: '6s 观察窗：自动续局 or 真打完', detail: '0.5.78：横幅后黑屏过场走完画面重新动起来 = 自动续局 → 立刻接着连招（不再固定空等 10s）', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '续下一局（不回主界面）', detail: '0.5.78：观察窗内画面一直不动才判本局结束 → 点「选对手→开始对战」；已自动续局时这两下落在战斗画面，无害', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '点得动自检 + 解卡', detail: '0.5.79：点「选对手/挑战」后画面必须变化，没反应 = 不在这界面上 → 试点候选「确定(1136,306)/(645,660) / 关闭 / 返回」解卡；仍不行 → 回主界面重进角斗场；连续 5 次失败即停手报错', coord: null, color: '248,81,73' },
         { kind: 'check', title: '打满后清结算回主界面', detail: '走完 rounds 局后 clearSettlement + goHome', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
         const rounds = Math.max(1, ctx.cfg.num('arenaBattleRounds') || 15);
-        // 首次进场：拖屏 + 角斗场入口，只走一遍
-        await ctx.flow(`角斗场忍术对战（共 ${rounds} 局）`, this.steps);
-        await ctx.drag([423, 360, 1357, 360], null, null, null, 340, '主场景拖到最右');
-        await ctx.drag([263, 360, 1287, 360], null, null, null, 390, '主场景拖到最右');
-        await ctx.go([974, 357], null, '打开角斗场');
-        await Utils.sleep(2000);   // 角斗场加载
+        const DIFF = [260, 90, 1020, 560];
+        const THR = ctx.cfg.get('vision.diffThreshold') || 0.012;
+        // 0.5.81：「这一下到底点得动吗」的判据要**显著高于背景漂移**，否则会把「画面自己在动」当成「点到了」。
+        //   实测（同一份 trace 的 320×180 缩略帧）：卡在战后那个页面时，相邻两次采样之间画面本身
+        //   就有 diff≈0.010~0.015 的轻微动画 —— 用 0.012 判，等于每次盲点都算「有反应」，
+        //   于是脚本以为点到了「选对手/开始对战」，一路盲点下去（用户看到「点到别的页面去了」）。
+        //   真点到东西时 diff≈0.16，大一个数量级。取 0.05：无效 ≈0.015 / 有效 ≈0.16，两侧余量都 >3 倍。
+        const REACT = Math.max(THR * 3, 0.05);
+        // 战后弹窗链里的「确定」落点（本次 trace 帧实测）：
+        //   ① 任务/奖励面板的确定 = (1136,306)（金色圆角块 x1088..1185 y278..334 的质心）
+        //   ② 「战斗结果」页的确定 = (645,660)（底中金色块 x570..720 y630..700）
+        const ARENA_OK_BTN = [1136, 306];
+        const RESULT_OK_BTN = [645, 660];
 
-        let needEntry = true;      // 本轮是否需要先点「选对手 → 开始对战」
+        // ── 0.5.79：进场 / 续局全部改成「点一下 → 看画面变没变」的自检式操作 ──────────
+        // 详见本任务顶部注释：旧实现对着固定两点盲点，点不到也继续点，于是卡住 + 点到别的页面。
+        const enterArena = async (why) => {
+          await ctx.drag([423, 360, 1357, 360], null, null, null, 340, '主场景拖到最右');
+          await ctx.drag([263, 360, 1287, 360], null, null, null, 390, '主场景拖到最右');
+          await ctx.go([974, 357], null, '打开角斗场');
+          await Utils.sleep(2000);   // 角斗场加载
+          Utils.log('info', `    🏟 已进场：${why}`);
+        };
+
+        /** 点一下 (x,y)，返回**这一下到底有没有让画面动**（0.5.81 起返回布尔）。
+         *  判据用 REACT（≥0.05）而不是默认 THR（0.012）—— 见 REACT 注释。 */
+        const tapAndDiff = async (x, y, label, waitMs, useFlow) => {
+          try { ctx.vision.snapshot(DIFF); } catch (e) { /* 视觉不可用则按已响应处理 */ }
+          if (useFlow) await ctx.tap([x, y], null, label);
+          else await ctx.op.clickNatural(x, y, null, label);
+          await Utils.sleep(waitMs || 1600);
+          let d = 1;
+          try { d = ctx.vision.frameDiff(DIFF); } catch (e) { d = 1; }
+          const reacted = d >= REACT;
+          Utils.log('info', `    · 点「${label}」@(${x},${y}) 画面变化 diff=${d.toFixed(4)}`
+            + (reacted ? '（已响应）' : `（没反应，判据 ≥${REACT}）`));
+          return reacted;
+        };
+
+        /** 卡在陌生页面 → 解卡：先松手，再逐个试点候选「确定/关闭/返回」，哪个让画面动了就用它 */
+        const unstuck = async (why) => {
+          ctx.op.releaseHold();
+          Utils.log('warn', `    ⚠ ${why} → 开始解卡`);
+          const spots = [
+            ARENA_OK_BTN,                                  // 战后 任务/奖励面板 确定
+            RESULT_OK_BTN,                                 // 战斗结果页 确定
+            [COORDS.common.confirm.x, COORDS.common.confirm.y],
+            [COORDS.common.confirmMid.x, COORDS.common.confirmMid.y],
+            [COORDS.common.close.x, COORDS.common.close.y],
+            [COORDS.common.closeAlt.x, COORDS.common.closeAlt.y],
+            [COORDS.common.back.x, COORDS.common.back.y],
+            [1150, 80],
+          ];
+          for (const s of spots) {
+            if (await tapAndDiff(s[0], s[1], `解卡(${s[0]},${s[1]})`, 1400, false)) {
+              Utils.log('info', `    ↺ 解卡命中：(${s[0]},${s[1]})`);
+              return true;
+            }
+          }
+          // 候选落点全不动 → 回主界面重进。⚠ 只有在**真的回到主界面**之后才重进：
+          //   goHome 失败还继续拖屏/点入口，就是在陌生页面上盲点，等于换个方式乱点。
+          Utils.log('warn', '    ⚠ 候选落点全部无反应 → 回主界面重进角斗场');
+          if (!(await ctx.home())) {
+            Utils.log('warn', '    ⚠ 回主界面也失败 → 本轮放弃（绝不盲点，交给下一轮重试或结束任务）');
+            return false;
+          }
+          await enterArena('解卡失败后重进');
+          return true;
+        };
+
+        await ctx.flow(`角斗场忍术对战（共 ${rounds} 局）`, this.steps);
+        await enterArena('首次进场');
+
+        // 0.5.78：忍术对战专用结算识别参数 —— 详见 waitForEnd 顶部注释（每个都对应一条实测证据）
+        const FIGHT_OPTS = {
+          noHome: true,             // 不回主界面，续局由本任务决定
+          noDefeat: true,           // 不认「失败」探针（在「双方登场」画面必然误报，trace 21 帧全中）
+          vsConfirm: 2,             // 横幅只显示 0.3~1s：连续 2 拍即落判（默认 3 拍会漏）
+          strongBanner: true,       // 金色横幅单拍强命中（d≤20）直接落判 —— 本次 trace 1020 帧零误报
+          blackWindowMs: 4000,      // 黑屏序列确认窗口 12s → 4s（12s 会把开场加载黑屏算进来）
+          staticEndAfterMs: 40000,  // 开局 40s 内「画面静止」不判结束（登场画面会静止 4.5s+）
+          stableEndFrames: 8,       // 静止 8 拍（≈2.4s）才算真的不在战斗（默认 3 拍太快）
+          bannerGraceMs: 6000,      // 横幅后观察窗：画面恢复动态=自动续局 → 继续连招
+          bannerRecencyMs: 30000,   // 近 30s 有横幅 → 允许静止判结束（战绩/入口页都是静止的）
+          assistMaxMs: 300000,      // 单场连招上限 5min（默认 150s 会把长局截断 → "不按键"）
+          maxWaitMs: 360000,        // 单场等待上限 6min
+          // 0.5.79：画面连续静止 ≥20s 无条件兜底结束本场。实测卡在战后任务面板时画面
+          //   像素级冻结（连拍 diff 0.0000~0.0012，阈值 0.012），而 battleStarted 闸让
+          //   「静止=打完」永远走不到 → 一局白等 360s。正常过场（匹配/登场）冻结上限约 4.5s。
+          staticBailMs: 20000,
+          // 0.5.81：整场结束快通道 —— 本场 ≥25s 后出现全屏黑（BR<12）即判整场打完。
+          //   实测：战斗中 BR≥100 /「小局切换」暗帧 14.0~22.3 /「整场结束」暗帧 1.3~5.3。
+          //   用户反馈的「7m32s~7m33s 战斗结束没识别到」= 那两拍 BR 5.3 / 1.3，本次直接落判（不再等 20s 兜底）。
+          darkEndAfterMs: 25000,
+        };
         for (let round = 1; round <= rounds; round++) {
           ctx.log(`—— 角斗场第 ${round}/${rounds} 局 ——`);
-          if (needEntry) {
-            await ctx.tap([315, 637], null, '选对手/挑战');
-            await Utils.sleep(3000);   // 匹配/准备动画
-            await ctx.tap([1165, 629], null, '开始对战');
+          ctx.op.releaseHold();
+
+          // ①「选对手/挑战」必须真的点得动：没反应 = 画面根本不在角斗场房间页 → 解卡后重试
+          let opened = false;
+          for (let a = 0; a < 5 && !opened; a++) {
+            if (await tapAndDiff(315, 637, '选对手/挑战', 2000, a === 0)) { opened = true; break; }
+            await unstuck(`第 ${a + 1} 次点「选对手/挑战」画面没反应（多半不在角斗场房间页）`);
           }
+          if (!opened) {
+            Utils.log('warn', '    ✗ 连续 5 次都点不动「选对手/挑战」，结束本任务（不再盲点乱点）');
+            break;
+          }
+
+          // ②「开始对战」同样自检
+          if (!(await tapAndDiff(1165, 629, '开始对战', 2500, true))) {
+            await unstuck('点「开始对战」画面没反应');
+            continue;
+          }
+
           const t0 = Date.now();
-          await ctx.fight({ noHome: true });        // 识别到「胜负已分」即返回（不回主界面）
-          Utils.log('info', `⚔️ 角斗场 第 ${round}/${rounds} 局打完（本局耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+          const reason = await ctx.fight(FIGHT_OPTS);   // 横幅(含观察窗) / 静止 / 冻结兜底 / 超时
+          Utils.log('info', `⚔️ 角斗场 第 ${round}/${rounds} 局打完（本局耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s · 结束原因 ${reason}）`);
           if (round >= rounds) break;
 
-          // 0.5.65：等「结算过场走完 → 房间页」，再决定下一局怎么开（判据见 waitRoomPage）。
-          // 房间页 = 手动点「选对手 → 开始对战」；已自动续局 = 什么都不点，直接进下一轮 fight。
-          const where = await ctx.battle.waitRoomPage(16000);
-          if (where === 'room') {
-            needEntry = true;
-            Utils.log('info', '    ↻ 已回到房间页 → 点「选对手 / 开始对战」开下一局（不回主界面）');
-          } else if (where === 'battle') {
-            needEntry = false;
-            Utils.log('info', '    ↻ 游戏已自动开下一局，继续按住普攻');
-          } else {
-            // timeout / home：宁可多点一次也不卡住 —— 这两点落在房间页是无害的按钮位，
-            // 真在战斗中则打在摇杆左侧空白处（避开普攻位 k=1137,589，避免误触「匹配」）。
-            needEntry = true;
-            Utils.log('warn', `    ↻ ${where === 'home' ? '意外回到主界面' : '等待房间页超时'} → 兜底点一次「选对手 / 开始对战」`);
+          // ③ 战后处置（0.5.81 改）
+          //   · 'darkend'（整场黑屏过场）/ 'frozen'（静止兜底）/ 'timeout' 这三种都表示
+          //     「本场不是靠胜负横幅正常收尾」—— 游戏一定在走「战绩 → 黑屏 → 奖励浮层 → 任务面板」
+          //     那串页面，脚本并不知道自己停在哪一页。
+          //     旧做法是让**下一轮**的「选对手」自检去发现（再逐个试 8 个解卡落点），
+          //     但那些点击本身就可能把面板/别的页面点开。现在不猜：**直接回主界面，重新拖屏进场**。
+          //   · 'settlement'（横幅+观察窗正常收尾）时角斗场通常停在房间页 → 保持原节奏，下一轮直接选对手。
+          const churn = await ctx.waitQuiet(1200, 3);
+          Utils.log('info', `    · 战后静默检查：期间画面重新变动 ${churn} 次`);
+          if (reason !== 'settlement') {
+            ctx.op.releaseHold();
+            await Utils.sleep(1500);          // 让结算/奖励动画再走一会儿，别和它抢
+            if (await ctx.nav.goHome()) {
+              Utils.log('info', `    ↻ 结束原因 ${reason} → 已回主界面，重新进场`);
+              await enterArena(`第 ${round} 局（${reason}）后重进`);
+            } else {
+              Utils.log('warn', '    ⚠ 回主界面未成功 → 交给下一轮的「点得动自检 + 解卡」处理（不在这里盲点）');
+            }
           }
+          await Utils.sleep(800);
         }
         await ctx.battle.clearSettlement();
         await ctx.home();
@@ -4009,69 +5207,90 @@
     },
 
     {
-      key: 'missionHall', name: '任务集会所', category: 'daily',
-      /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应）
-       *  2026-09-12 进入部分按校准 JSON 重做：拖×2 到最右 → 入口 (545,466)；派遣部分不变 */
+      key: 'secretRealm', name: '秘境挑战', category: 'battle', timeout: 600000,
+      /** 0.5.71：完全重制。流程：导航进入秘境匹配 → 点匹配 → 进战斗识别顶部秘境名
+       *  → 非落岩/毒风/雷霆则点「退出战斗」重匹配 → 目标秘境点「继续战斗」→
+       *  1:1 复刻对应录制战斗按键 → 等待战斗结束（单局总限时 2 分钟）→ 结算回主界面。
+       *  超时未结束判定卡住，回主界面重来。 */
       steps: [
-        { kind: 'drag', title: '主场景拖到最右（第一次）', detail: '横向匀速拖动 x 325→1117，y=360', coord: null, color: '88,166,255' },
-        { kind: 'drag', title: '主场景拖到最右（第二次）', detail: '横向匀速拖动 x 301→1017，y=360', coord: null, color: '88,166,255' },
-        { kind: 'tap', title: '打开集会所', detail: '点「任务集会所」入口 (545,466)', coord: [545, 466], color: '88,166,255' },
-        { kind: 'tap', title: '派遣任务 ×3', detail: '纵向 +60px 连点 3 次（坐标为首点 y，依次 +60）', coord: [COORDS.daily.missionDispatch.x, COORDS.daily.missionDispatch.y], color: '126,231,135' },
-        { kind: 'tap', title: '确认弹窗', detail: '每个任务点一次中部「确认」', coord: [COORDS.common.confirmMid.x, COORDS.common.confirmMid.y], color: '210,153,34' },
-        { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '导航到秘境匹配', detail: '用 秘境探险.json 录制导航进入匹配界面', coord: null, color: '88,166,255' },
+        { kind: 'check', title: '点匹配进战斗', detail: '点系统匹配/挑战，等待战斗入口', coord: [1165, 587], color: '126,231,135' },
+        { kind: 'check', title: '识别秘境名称', detail: '顶部中央名称模板匹配：落岩/毒风/雷霆', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '非目标退出重匹', detail: '点「退出战斗」(430,500) 返回匹配界面', coord: [430, 500], color: '248,81,73' },
+        { kind: 'check', title: '目标继续战斗', detail: '点「继续战斗」(850,500) 开始 1:1 按键回放', coord: [850, 500], color: '126,231,135' },
+        { kind: 'check', title: '结算回主界面', detail: '等战斗结束 → 清结算 → 回主界面（单局 2 分钟超时）', coord: null, color: '210,153,34' },
       ],
       async run(ctx) {
-        await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
-        await ctx.drag([325, 360, 1117, 360], null, null, null, 530, '主场景拖到最右');
-        await ctx.drag([301, 360, 1017, 360], null, null, null, 690, '主场景拖到最右');
-        await ctx.go([545, 466], null, '打开集会所');
-        for (let i = 0; i < 3; i++) {
-          await ctx.tap([COORDS.daily.missionDispatch.x, COORDS.daily.missionDispatch.y + i * 60]);
-          await ctx.tap(COORDS.common.confirmMid);
+        await ctx.flow(this);
+        const MAX_OUTER = 5;
+        const MAX_INNER = 12;
+        const BATTLE_TIMEOUT = 120000;
+        const EXIT_BATTLE = SECRET_REALM_EXIT_BATTLE;
+        const CONTINUE_BATTLE = SECRET_REALM_CONTINUE_BATTLE;
+        const CHALLENGE = SECRET_REALM_CHALLENGE;
+
+        for (let outer = 0; outer < MAX_OUTER; outer++) {
+          await Runtime.check();
+          await ctx.home();
+          Utils.log('info', `🌀 秘境挑战 外层 ${outer + 1}/${MAX_OUTER}：回主界面→导航`);
+          await ctx.replaySeq(SECRET_REALM_NAV, { label: '进入秘境匹配' });
+
+          for (let inner = 0; inner < MAX_INNER; inner++) {
+            await Runtime.check();
+            Utils.log('info', `  内层 ${inner + 1}/${MAX_INNER}：点匹配`);
+            await ctx.op.tap(CHALLENGE[0], CHALLENGE[1]);
+            await Utils.sleep(2500);
+
+            const realm = await ctx.identifyRealmName();
+            if (!realm) {
+              Utils.log('warn', '  未识别秘境名，回主界面重新开始');
+              break;
+            }
+
+            if (realm !== 'luoyan' && realm !== 'dufeng' && realm !== 'leiting') {
+              Utils.log('info', `  非目标秘境 ${realm}，点退出战斗重匹配`);
+              await ctx.op.tap(EXIT_BATTLE[0], EXIT_BATTLE[1]);
+              await Utils.sleep(1500);
+              continue;
+            }
+
+            Utils.log('info', `  ✅ 目标秘境 ${realm}，继续战斗`);
+            await ctx.op.tap(CONTINUE_BATTLE[0], CONTINUE_BATTLE[1]);
+            await Utils.sleep(1000);
+            const macro = SECRET_REALM_MACROS[realm];
+            const battleStart = Date.now();
+            await ctx.replaySeq(macro, { label: `${realm} 战斗回放` });
+
+            const elapsed = Date.now() - battleStart;
+            const remaining = BATTLE_TIMEOUT - elapsed;
+            let result = 'timeout';
+            if (remaining > 3000) {
+              const oldMax = ctx.cfg.num('battle.maxWait') || 180000;
+              ctx.cfg.set('battle.maxWait', remaining);
+              try {
+                result = await ctx.battle.waitForEnd();
+              } catch (e) {
+                Utils.log('warn', `  waitForEnd 异常: ${e.message}`);
+              } finally {
+                ctx.cfg.set('battle.maxWait', oldMax);
+              }
+            }
+            if (result === 'timeout') {
+              Utils.log('warn', '  战斗未在 2 分钟内结束，判定卡住，回主界面重来');
+              await ctx.home();
+              break;
+            }
+
+            Utils.log('info', '  战斗结束，清理结算');
+            await ctx.battle.clearSettlement();
+            await ctx.home();
+            return;
+          }
         }
-        await ctx.home();
-
+        throw new Error('秘境挑战超过最大重试次数');
       }
     },
 
-    {
-      key: 'secretRealm', name: '秘境挑战', category: 'battle', timeout: 300000,
-      /** 0.5.56：分类从 daily 移入 battle（与「角斗场忍术对战」同属战斗菜单，可单独开跑） */
-      /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应） */
-      steps: [
-        { kind: 'tap', title: '打开秘境', detail: '点「秘境挑战」入口', coord: [COORDS.daily.secretEntry.x, COORDS.daily.secretEntry.y], color: '88,166,255' },
-        { kind: 'tap', title: '点挑战', detail: '点「挑战」按钮', coord: [COORDS.common.challenge.x, COORDS.common.challenge.y], color: '126,231,135' },
-        { kind: 'check', title: '打完并结算', detail: 'fight() 等战斗结束 → 清结算 → 回主界面（超时 300s）', coord: null, color: '248,81,73' },
-      ],
-      async run(ctx) {
-        await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
-        await ctx.go(COORDS.daily.secretEntry);
-        await ctx.tap(COORDS.common.challenge);
-        await ctx.fight();
-
-      }
-    },
-
-    {
-      key: 'shopBuy', name: '商店购买', category: 'daily',
-      /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应） */
-      steps: [
-        { kind: 'tap', title: '打开商店', detail: '点主界面「商店」入口', coord: [COORDS.nav.store.x, COORDS.nav.store.y], color: '88,166,255' },
-        { kind: 'tap', title: '选商品', detail: '点第 1 个商品', coord: [COORDS.daily.shopItem1.x, COORDS.daily.shopItem1.y], color: '126,231,135' },
-        { kind: 'tap', title: '点购买', detail: '点「购买」按钮', coord: [COORDS.daily.shopBuyBtn.x, COORDS.daily.shopBuyBtn.y], color: '210,153,34' },
-        { kind: 'tap', title: '确认购买', detail: '点购买确认弹窗', coord: [COORDS.daily.shopConfirm.x, COORDS.daily.shopConfirm.y], color: '210,153,34' },
-        { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景', coord: null, color: '188,140,255' },
-      ],
-      async run(ctx) {
-        await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
-        await ctx.go(COORDS.nav.store);
-        await ctx.tap(COORDS.daily.shopItem1);
-        await ctx.tap(COORDS.daily.shopBuyBtn);
-        await ctx.tap(COORDS.daily.shopConfirm);
-        await ctx.home();
-
-      }
-    },
 
 
     {
@@ -4123,7 +5342,7 @@
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.drag([1033, 274, 120, 310], null, null, null, 670, '主场景向左拖');
         await ctx.drag([965, 304, 306, 304], null, null, null, 600, '主场景向左拖');
-        await Utils.sleep(500);    // 校准间隔 0.4s
+        await Utils.sleep(1000);    // 校准间隔 0.4s
         await ctx.go([543, 144], null, '打开试炼之地');
         await Utils.sleep(1500);   // 校准间隔 1.6s
         await ctx.tap([392, 323], null, '选「修行之路」');
@@ -4207,6 +5426,154 @@
 
       }
     },
+
+    {
+      key: 'missionHall', name: '任务集会所', category: 'battle',
+      /** 0.5.74：从「日常」移入**战斗组**（长期挂机任务，方便单独选取）。
+       *  战斗组不参与「当天已做过」记录 → Progress.tracked() 对 battle 返回 false，
+       *  用户点了就是要跑，不会因为「今天做过了」被跳过。
+       *  ⚠ 物理位置挪到 TASK_DEFS **末尾**：8 小时常驻循环若排在中途，
+       *     会一直占着调度、把后面的秘境挑战/角斗场彻底饿死。
+       *
+       *  0.5.75：**空闲判定改为只看顶部 3 个槽位**（用户口径）。
+       *  ❌ 旧写法读底部「可接受任务: N/9」——该计数在任务完成那一刻就归还：
+       *     实测三槽全「可领取」时它仍显示 9/9 → 会被当成「有 3 个空位」去硬接。
+       *  ✅ 现在：逐槽判 空缺 / 计时中 / 可领取，空闲位 = 可领取 + 空缺，
+       *     3 个槽全在计时中才算「满 3」。
+       *
+       *  0.5.80（依据 2026-09-11 真机录制「任务集会所1」+「任务集会所2」二次标定）：
+       *   ① **进面板的两段拖动 y 由 360 改为 282**（录制实测；(301,360) 处压在 UI 元素上 std≈31.7，
+       *      (301,282) 处是纯色远景 std≈3.9，才是干净的起拖区）。首轮失败会回主界面用 y=360 重试一次。
+       *   ② **面板判据收紧**：旧 `hangOk || btnOk>=2` 会在「推荐小队页 / 出发页」误判成在面板
+       *      （那两页 (1171,653) 也是金色，hangOk 命中）→ 会在那两页乱点。
+       *      现改为 `btnOk>=2`，按钮全灰时用「可领取」标签模板复核兜底。
+       *   ③ **槽位光晕兜底加量程上限** 80（非面板页光晕 86~228 会被全判「可领取」）。
+       *
+       *  0.5.81（用户 2026-09-20 口径）：
+       *   ① **挂机方式整体换掉**：旧做法是留在面板里、每 3 分钟轻点/短滑保活 ——
+       *      用户实测「左右滑动这样不行，还是被判定为无操作而超时」。
+       *      现在：**每轮领完/接完就回主界面 → 等 pollMin(5) 分钟 → 重新拖屏进面板**，
+       *      靠「主界面 ↔ 集会所」来回切换保持活跃（见 MISSION.pollMin / MissionHall.sleepAtHome）。
+       *      等待期间刻意不做任何操作 —— 主界面拖动会移动镜头，下一轮的拖屏坐标就偏了。
+       *   ② 上一轮（0.5.80）修的是「进不去面板 / 在不在面板判错」；这一轮修的是「等太久被踢」。
+       *
+       *  0.5.77（用户三项要求，依据 2026-09-19 真机录制「任务集会所接了1次任务.json」）：
+       *   ① **多个任务可领取会弹「一键领取」确认框** → 点「确定 (519,451)」，
+       *      随后还有「恭喜你获得」全屏浮层 → 点一下收起。两步都补进 collectDone。
+       *   ② **云游戏长时间不操作会超时** → 挂机期间每 3 分钟保活一次
+       *      （轻点面板空白 / 单向短滑），节奏由 `keepAliveMin` 控制。
+       *   ③ **挂机不回主界面** → 直接在集会所面板里等 30 分钟，到点原地读槽位；
+       *      只有面板真的丢了才走 recover（清弹窗 → 回主界面重开）。
+       *  ── 其余口径（用户 2026-09-18 确认）──
+       *   · 只做 **红宝箱 / 蓝宝箱** 任务，**绿宝箱不做**
+       *     （⚠ 宝箱 = 该行**最右侧**奖励格；行内奖励项 1~4 个不定，绝不能固定取第 3 格）
+       *   · 同时最多 **3 个**任务在跑（= 顶部槽位数）
+       *   · 不用「换一组」（右侧刷新额度不是免费的）
+       *  ── 判断全部走视觉，无固定坐标盲点 ──
+       *   槽位三态 空缺/计时中/可领取                 → MissionHall.readSlots
+       *   宝箱色相 绿[95,175)/蓝[175,260)/品红[260,350)=红 → MissionHall.chestType
+       *   接取按钮 金色(可接)/暗色(已接)              → MissionHall.btnAvailable
+       *   面板检测 右下「换一组」金按钮 / 接取按钮金  → MissionHall.panelAnchors
+       *   一键领取确认弹窗（浅米占比）                → MissionHall.popupOpen
+       *   恭喜你获得浮层（亮度骤降）                  → MissionHall.overlayOpen
+       *  几何/阈值/真机样本统计见上方 MISSION 常量注释块。 */
+      timeout: MISSION.loopHours * 3600000 + 300000,   // 常驻循环，必须顶掉默认 4 分钟单任务超时
+      hangLoop: true,                                  // 常驻挂机：不参与分类按钮的「跑全部」兜底，必须单独勾选
+      steps: [
+        { kind: 'check', title: '确保在集会所面板', detail: '已在面板内就直接继续（不回主界面）；不在才 回主界面→两段拖动(325→1117 / 301→1017)→点入口 (545,466)，失败再试备用落点 (591,480)', coord: null, color: '188,140,255' },
+        { kind: 'check', title: '读顶部 3 个槽位', detail: '逐槽判 空缺/计时中/可领取；空闲位 = 可领取 + 空缺，三个槽全计时中才算满 3', coord: null, color: '210,153,34' },
+        { kind: 'check', title: '领取已完成任务', detail: '点「可领取」槽位图标；多个可领取会弹「是否一键领取所有奖励」→ 点确定 (519,451)，再点掉「恭喜你获得」浮层', coord: null, color: '210,153,34' },
+        { kind: 'check', title: '按空闲位补接红/蓝', detail: '空闲 N 位就最多再接 N 个红/蓝宝箱任务；不用「换一组」', coord: null, color: '126,231,135' },
+        { kind: 'check', title: '回主界面等 5 分钟', detail: '0.5.81：每轮领完/接完就回主界面，等 pollMin(5) 分钟再重新进场；靠「主界面 ↔ 集会所」来回切换保持活跃（面板内轻点/短滑实测仍被判无操作超时）', coord: null, color: '88,166,255' },
+      ],
+      async run(ctx) {
+        const ROUND_MS = MISSION.loopMin * 60000;     // 每轮间隔（分钟 → ms）
+        const HARD_MS = MISSION.loopHours * 3600000;  // 挂机总时长上限
+        const t0 = Date.now();
+        let round = 0, acc = 0, col = 0;
+        // ⚠ 本 run 全程用底层 op / nav API（clickNatural / swipe / nav.goHome）：
+        //   ctx.tap / ctx.drag / ctx.go / ctx.home 都会把流程图索引 +1，
+        //   而本任务每轮重开流程图、靠 ctx.step() 显式标步 —— 混用会把索引顶飞。
+
+        while (true) {
+          await Runtime.check();                      // 用户点「停止」→ AbortError 立刻收尾
+          if (round > 0 && Date.now() - t0 >= HARD_MS) {
+            Utils.log('info', `⏹ 任务集会所挂机已满 ${MISSION.loopHours} 小时 → 收尾`);
+            break;
+          }
+          round++;
+          await ctx.flow({
+            name: round === 1 ? this.name : `${this.name} · 第${round}轮`,
+            key: this.key, steps: this.steps,
+          });
+          Utils.log('info', `===== 任务集会所 第 ${round} 轮 @ ${new Date().toLocaleTimeString('zh-CN', { hour12: false })} =====`);
+
+          // —— 1) 确保在集会所面板 ——（0.5.77：挂机期间不回主界面，只有不在面板时才重开）
+          ctx.step('确保在集会所面板');
+          let ok = false;
+          try {
+            await MissionHall.clearPopups(ctx);       // 先收掉可能残留的弹窗/浮层
+            ok = MissionHall.inPanel(ctx);
+            if (ok) {
+              Utils.log('info', '    ✓ 已在集会所面板内（沿用上一轮挂机位置，不回主界面）');
+            } else {
+              Utils.log('info', '    ↻ 面板不在 → 重新打开集会所');
+              ok = await MissionHall.openPanel(ctx);
+            }
+          } catch (e) { Utils.log('warn', `⚠ 进面板阶段异常：${(e && e.message) || e}`); }
+          ctx.stepResult(ok);
+          if (!ok) {
+            Utils.log('warn', '⚠ 未确认集会所面板 → 本轮跳过，等下一轮');
+            await MissionHall.sleepInterruptible(ROUND_MS);
+            continue;
+          }
+
+          // —— 2) 读顶部 3 个槽位（空闲/满 3 的唯一判据）——
+          ctx.step('读顶部 3 个槽位');
+          const s0 = await MissionHall.readSlots(ctx);
+          if (s0.ok) {
+            Utils.log('info', `📋 顶部槽位：${MissionHall.fmtSlots(s0)} → 空闲 ${s0.free}/${MISSION.concurrency}` +
+              `（可领取 ${s0.done} + 空缺 ${s0.empty}），计时中 ${s0.running}`);
+            Utils.log('debug', `    ${MissionHall.detail(s0)}`);
+          } else {
+            Utils.log('warn', `⚠ 读槽位失败：${s0.why}`);
+          }
+          ctx.stepResult(!!s0.ok);
+
+          // —— 3) 先把已完成的任务领掉（腾出在跑名额）——
+          ctx.step('领取已完成任务');
+          const got = await MissionHall.collectDone(ctx);
+          col += got;
+          ctx.stepResult(true);
+          if (got) Utils.log('info', `🎁 本轮领取 ${got} 个已完成任务（累计 ${col}）`);
+
+          // —— 4) 按空闲位补接红/蓝宝箱任务 ——
+          ctx.step('按空闲位补接红/蓝');
+          let n = 0;
+          if (!MissionHall.inPanel(ctx)) {
+            Utils.log('warn', '⚠ 领取后不在面板（弹窗/浮层没收干净）→ 本轮不再接取');
+            await MissionHall.recover(ctx);
+          } else {
+            n = await MissionHall.acceptQualifying(ctx);
+            acc += n;
+            if (n) Utils.log('info', `✅ 本轮接取 ${n} 个红/蓝宝箱任务（累计 ${acc}）`);
+          }
+          ctx.stepResult(true);
+
+          // —— 5) 回主界面等 pollMin 分钟 → 下一轮重新进场（0.5.81 用户口径）——
+          //   旧做法：留在面板里挂机 + 每 3 分钟轻点/短滑保活 —— 用户实测**仍被判无操作超时**。
+          //   现在：每轮结束就回主界面，等 pollMin(5) 分钟，下一轮重新拖屏进面板 ——
+          //   靠「主界面 ↔ 集会所」来回切换产生真实交互，等待期间不操作（免得改掉镜头位置）。
+          ctx.step('回主界面等 5 分钟');
+          const atHome = await MissionHall.sleepAtHome(ctx, MISSION.pollMin * 60000);
+          Utils.log('info', `⏳ 已回主界面并等待 ${MISSION.pollMin} 分钟（到点重新拖屏进集会所）`);
+          ctx.stepResult(atHome);
+        }
+        // 收尾：挂满或用户停止 → 回主界面，别把面板留在屏幕上
+        try { await ctx.nav.goHome(); } catch (e) { /* ignore */ }
+        Utils.log('info', `🏁 任务集会所结束：共 ${round} 轮，接取 ${acc} 个，领取 ${col} 个`);
+      }
+    },
   ];
 
   class Task {
@@ -4251,9 +5618,20 @@
       const all = TASK_DEFS.filter(d => d.category === cat);
       const on = all.filter(d => sw[d.key]);
       if (!on.length && all.length) {
-        Utils.log('warn', `⚠ [${cat}] 分类下没有勾选的任务 → 直接运行该类全部 ${all.length} 个：` +
-          all.map(d => d.name).join('、'));
-        return all.map(d => new Task(d));
+        // 0.5.74：`hangLoop` 常驻挂机任务（任务集会所 8 小时循环）**不参与**这条兜底 ——
+        //   否则「一个都没勾选」时会被顺手带上，之后 8 小时调度全被它占住、别的都跑不了。
+        //   要跑它请**单独勾选**。也正是靠这个，战斗组里能只挑它一项出来跑。
+        const runAll = all.filter(d => !d.hangLoop);
+        const hangs = all.filter(d => d.hangLoop);
+        if (hangs.length) {
+          Utils.log('warn', `⚠ [${cat}] 常驻挂机任务需单独勾选，不参与「跑全部」兜底：` +
+            hangs.map(d => d.name).join('、'));
+        }
+        if (runAll.length) {
+          Utils.log('warn', `⚠ [${cat}] 分类下没有勾选的任务 → 直接运行该类全部 ${runAll.length} 个：` +
+            runAll.map(d => d.name).join('、'));
+          return runAll.map(d => new Task(d));
+        }
       }
       return on.map(d => new Task(d));
     }
@@ -4294,7 +5672,7 @@
       Utils.log('info', `▶ 开始执行，共 ${this.queue.length} 个任务`);
 
       while (this.queue.length && this.running && !Runtime.aborted) {
-        while (this.paused && this.running && !Runtime.aborted) await Utils.sleep(800);
+        while (this.paused && this.running && !Runtime.aborted) await Utils.sleep(1000);
         if (!this.running || Runtime.aborted) break;
 
         const task = this.queue.shift();
@@ -4755,7 +6133,7 @@
 
     /**
      * 回放校准序列（验证录制是否正确）
-     * @param {object} opt { gap: 每步间隔 ms（默认 900）, from: 起始序号, to: 结束序号 }
+     * @param {object} opt { gap: 每步间隔 ms（默认 1000）, from: 起始序号, to: 结束序号 }
      */
     async replay(opt) {
       const o = opt || {};
@@ -4764,7 +6142,7 @@
       if (this.replaying) { Utils.log('warn', '⚠ 正在回放中'); return false; }
       const steps = this.steps.filter(s => !o.from || s.seq >= o.from).filter(s => !o.to || s.seq <= o.to);
       this.replaying = true; this._stopFlag = false;
-      Utils.log('info', `▶ 回放 ${steps.length} 步（间隔 ${o.gap || 900}ms）`);
+      Utils.log('info', `▶ 回放 ${steps.length} 步（间隔 ${o.gap || 1000}ms）`);
       for (const s of steps) {
         if (this._stopFlag) break;
         try {
@@ -4782,8 +6160,8 @@
         } catch (e) {
           Utils.log('warn', `  ▶ [${s.seq}] 失败: ${e.message}`);
         }
-        // 回放步间隔：默认 900ms；下限 MIN_OP_DELAY（0.5s）——保证回放也不会出现「连点被吞」
-        await Utils.sleep(Math.max(MIN_OP_DELAY, o.gap == null ? 900 : o.gap));
+        // 回放步间隔：默认 1000ms；下限 MIN_OP_DELAY（0.5.76 起 1s）——保证回放也不会出现「连点被吞」
+        await Utils.sleep(Math.max(MIN_OP_DELAY, o.gap == null ? 1000 : o.gap));
       }
       this.replaying = false;
       Utils.log('info', '⏹ 回放结束');
@@ -5085,7 +6463,6 @@
           <div class="br">
             <button class="btn" id="na-probe">🔍 探测</button>
             <button class="btn" id="na-mark-btn">👁 标记开</button>
-            <button class="btn" id="na-dry">🧪 干跑</button>
             <button class="btn" id="na-flow">📋 流程图</button>
             <button class="btn" id="na-cfg">⚙ 设置</button>
           </div>
@@ -5107,6 +6484,11 @@
             <select id="na-flow-preview" style="flex:1;min-width:0;font-size:11px;padding:1px 2px"></select>
           </div>
           <div id="na-calib-info" style="font-size:11px;color:#e94560;margin-bottom:6px">校准：记录真人点击 + 按键 + 抓帧取色</div>
+          <div class="br">
+            <button class="btn" id="na-trace">🔬 追踪</button>
+            <button class="btn" id="na-trace-dl">💾 导出</button>
+          </div>
+          <div id="na-trace-info" style="font-size:11px;color:#2ecc71;margin-bottom:6px">追踪：关闭（真实点击全记录，定位自动运行问题）</div>
 
           <div class="sec" id="na-pv-wrap">
             <div class="st">画面预览（点击可取色）</div>
@@ -5170,7 +6552,7 @@
         chk('任务前回主界面', 'nav.requireHome') +
         chk('盲按返回(场景判不出时)', 'nav.blindBack') +
         chk('盲按时发ESC', 'nav.useEsc') +
-        chk('跳过已完成', 'runtime.skipDoneToday') +
+        chk('跳过已完成(非战斗组)', 'runtime.skipDoneToday') +
         chk('战斗开自动', 'battle.autoBattle') +
         chk('战斗开倍速', 'battle.speedUp') +
         chk('战斗辅助(点招按钮)', 'battle.keyAssist') +
@@ -5211,6 +6593,9 @@
           ? `<div class="cg" style="margin-top:2px"><label class="ci">角斗场次数(次/组)
                <input type="number" data-p="arenaBattleRounds" min="1" step="1" style="width:58px"
                       value="${this.config.get('arenaBattleRounds')}"></label></div>`
+            + `<div style="margin-top:3px;opacity:.6;font-size:11px;line-height:1.5">`
+            + `长期任务：不记录「今天做过」，不会因已完成被跳过；`
+            + `任务集会所按 30 分钟一轮常驻挂机（排在本组最后，不会挡住其他任务）</div>`
           : '';
         html += `<div class="st" style="margin-top:6px">${title}</div><div class="cg">${keys.map(item).join('')}</div>${extra}`;
       }
@@ -5317,7 +6702,7 @@
           const ok = sdk.key('k', null, 200, true);
           const ls = sdk.lastSend || {};
           this.addLog('i', `⌨ 已发 k：sent=${ok} tried=[${(ls.tried || []).join(' ')}]`);
-          await Utils.sleep(900);
+          await Utils.sleep(1000);
           try { diff = vis.frameDiff(REGION); } catch (e) {}
           if (diff < 0) {
             this.addLog('i', '⌨ 画面差异取不到（视觉未启用）→ 只能自己看角色有没有出拳');
@@ -5405,6 +6790,20 @@
       this._syncCalib = syncCalib;
       syncCalib();
 
+      // 追踪器开关
+      const traceBtn = p.querySelector('#na-trace');
+      const traceInfo = p.querySelector('#na-trace-info');
+      const syncTrace = () => {
+        const on = AutoTrace.on;
+        traceBtn.textContent = on ? '🔬 追踪中' : '🔬 追踪';
+        traceBtn.className = on ? 'btn pri' : 'btn';
+        traceInfo.textContent = `追踪：${on ? '开启' : '关闭'}（${AutoTrace.steps.length} 步 · 真实点击全记录，定位自动运行问题）`;
+      };
+      traceBtn.onclick = () => { AutoTrace.toggle(); syncTrace(); };
+      p.querySelector('#na-trace-dl').onclick = () => { AutoTrace.downloadViewer(); };
+      this._syncTrace = syncTrace;
+      syncTrace();
+
       // 点击/按键可视化开关
       const markBtn = p.querySelector('#na-mark-btn');
       const syncMarks = () => {
@@ -5422,16 +6821,6 @@
       };
       this._syncMarks = syncMarks;
       syncMarks();
-
-      // 干跑模式开关
-      const dryBtn = p.querySelector('#na-dry');
-      const syncDry = () => {
-        dryBtn.textContent = DryRun.on ? '🧪 干跑中' : '🧪 干跑';
-        dryBtn.className = DryRun.on ? 'btn pri' : 'btn';
-      };
-      dryBtn.onclick = () => { DryRun.toggle(); syncDry(); };
-      this._syncDry = syncDry;
-      syncDry();
 
       // 流程图开关
       const flowBtn = p.querySelector('#na-flow');
@@ -5580,6 +6969,7 @@
           el('na-scene').textContent = SCENE_LABELS[sc] || sc;
         }
         if (this.calib && this.calib.active && this._syncCalib) this._syncCalib();
+        if (this._syncTrace) this._syncTrace();
         if (!this.app.sdk.ready) {
           // 区分"没进云游戏"与"进了但 SDK 还没挂载"
           const v = document.getElementById('gmsdk-video-element');
@@ -5740,6 +7130,8 @@
       this.progress = new Progress(this.config);
       this.calib = new Calibrator(this.vision, this.scenes);
       this.calib.bind(this);
+      this.trace = AutoTrace;
+      this.trace.bind(this);
       this.ctx = new TaskContext(this.op, this.config, this.nav, this.scenes, this.battle, this.progress, this.vision);
       this.scheduler = new TaskScheduler(this.ctx, this.config, this.progress);
       this.panel = new ControlPanel(this);
@@ -5776,18 +7168,20 @@
         battle: this.battle,
         progress: this.progress,
         calib: this.calib,
+        trace: {
+          on() { AutoTrace.start(); return AutoTrace.on; },
+          off() { AutoTrace.stop(); return AutoTrace.on; },
+          toggle() { return AutoTrace.toggle(); },
+          state() { return AutoTrace.state(); },
+          count() { return AutoTrace.steps.length; },
+          dump() { return AutoTrace.dump(); },
+          clear() { return AutoTrace.clear(); },
+          download() { return AutoTrace.download(); },
+          downloadViewer() { return AutoTrace.downloadViewer(); },
+        },
         coords: COORDS,
         probes: PROBES,
         tasks: TASK_DEFS,
-        /** 干跑模式：dryRun.on() / off() / toggle() / dump() —— 不真实点击，只在画面上画圈 */
-        dryRun: {
-          on() { DryRun.start(); return DryRun.on; },
-          off() { DryRun.stop(); return DryRun.on; },
-          toggle() { return DryRun.toggle(); },
-          state() { return DryRun.on ? 'ON（' + DryRun.log.length + ' 次已拦截）' : 'OFF'; },
-          dump() { return DryRun.dump(); },
-          clear() { return DryRun.clear(); },
-        },
         /** 点击可视化：marks.on()/off()/test() */
         marks: {
           on() { Marks.forceOn = true; return 'marks ON'; },
@@ -5950,15 +7344,6 @@
           }
         });
       }
-      // Ctrl+Shift+D：切换干跑模式（不真实点击）
-      document.addEventListener('keydown', e => {
-        if (e.ctrlKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
-          e.preventDefault();
-          DryRun.toggle();
-          if (this.panel && this.panel._syncDry) this.panel._syncDry();
-        }
-      });
-
       // Ctrl+Shift+M：切换点击标记可视化
       document.addEventListener('keydown', e => {
         if (e.ctrlKey && e.shiftKey && (e.key === 'M' || e.key === 'm')) {
@@ -5996,6 +7381,14 @@
           if (this.calib.replaying) { this.calib.stopReplay(); Utils.log('warn', '⏹ 停止回放'); }
           else this.calib.replay({ gap: 900 });
           if (this.panel && this.panel._syncCalib) this.panel._syncCalib();
+        }
+      });
+      // Ctrl+Shift+T：切换自动运行追踪（真实点击全记录，定位自动运行问题）
+      document.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+          e.preventDefault();
+          AutoTrace.toggle();
+          if (this.panel && this.panel._syncTrace) this.panel._syncTrace();
         }
       });
     }

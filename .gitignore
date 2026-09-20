@@ -5,3 +5,6 @@ dist/
 .tmp/
 .tmp_rec/
 .tmp_rec.txt
+
+# 本地回滚点（不是发布物）
+naruto-auto.user.js.pre*
