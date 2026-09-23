@@ -2,7 +2,7 @@
 
 基于腾讯云游戏 TCGSDK / gamematrix 的火影忍者手游自动化脚本，浏览器直接运行。
 
-![version](https://img.shields.io/badge/version-0.5.81-blue)
+![version](https://img.shields.io/badge/version-0.6.28-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/Tampermonkey-userscript-orange)
 
