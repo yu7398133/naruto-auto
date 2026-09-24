@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.28
+// @version      0.6.33
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.28'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.33'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1051,6 +1051,15 @@
   // ============================================================
   const SIG_W = 64, SIG_H = 36;
 
+  // ── 界面等待标准值（v0.6.29，用户口径 2026-09-24）────────────────────────
+  //  用户：「『拖动/开页后只等 1s』这个应该是应用的标准块，这个可以统一改为 1.5s」。
+  //  背景：多个任务在「拖动主界面」或「点开某页」之后只等 1000ms 就点下一步，
+  //    实测界面还没渲染完 → 点击落空，后续步骤全在旧界面上空点（赠送体力 / 生存试炼
+  //    均因此整任务白跑）。统一提到 1500ms，作为**界面等待的标准值**。
+  //  ⚠ 只用于「等界面/动画就绪」；**不要**用于逻辑轮询、校准采样、暂停自旋等
+  //    （那些地方的 1000 是有语义的节拍，改了会改变行为）。
+  const UI_WAIT_MS = 1500;
+
   // 「代码缺陷类」异常特征（v0.6.28）：这类错误重试无用，必须直接暴露。
   //   覆盖：调用了不存在的方法/属性（方法放错类、拼写错、重构漏改）、
   //         以及 undefined 取属性 —— 都是"代码写错了"，不是"环境没就绪"。
@@ -1100,6 +1109,29 @@ const ARENA_REWARD_STATUS_AREAS = [
 const ARENA_REWARD_RED_MIN_PCT = 8;          // 红像素占比阈值（实测红 12.9+ / 干扰 ≤1.1）
 const ARENA_REWARD_EXIT = [1245, 320];       // 面板最右侧：返回忍术对战界面（两条路径都用它）
 // ⚠ 无批次上限：用户口径「我就是需要无限打，直到领取奖励」→ 打到领满为止。
+
+// ── v0.6.30：忍术奖励面板「已打开」探针（周围变暗）──────────────────────────
+//  用户口径（2026-09-24）：「奖励界面……**周围变暗**，以这个为探针，
+//    在点击打开奖励面板之后、点击领取之前添加这个探针」。
+//
+//  为什么必须有它（这次 193 批空转 87 分钟的根因）：
+//    `(793,642)` 打开面板是**盲点**，没有任何确认。面板没打开时，后续 4 次
+//    「领取」(1128,177) 全点在别的界面上，礼包状态读数恒定 → 永远不满足"领满"
+//    → 无限循环（实测 135 次 no-ready、539 次无效领取点击）。
+//
+//  实测（1920x1080 截图 tools/png-luma.cjs，已 ÷1.5 换算成 1280x720）：
+//    遮罩区（面板四周）：左边缘 5~13 / 右边缘 15~49 / 底边 15~37 / 四角 3~37
+//    中央亮面板：        130~229
+//    ⇒ 遮罩 ≤49、面板 ≥130，分离约 3 倍。阈值取 **80**（两侧余量均 >1.5 倍）。
+const ARENA_PANEL_DIM_AREAS = [
+  [10, 30, 120, 100],     // 左上（面板外）
+  [1160, 30, 1270, 100],  // 右上
+  [10, 620, 120, 700],    // 左下
+  [10, 300, 60, 450],     // 左中
+  [1220, 300, 1270, 450], // 右中
+];
+const ARENA_PANEL_DIM_LUMA_MAX = 80;   // 每块平均亮度 ≤ 此值算「这块暗了」
+const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面板已打开
 
   class VisionCore {
     constructor() {
@@ -1525,6 +1557,39 @@ const ARENA_REWARD_EXIT = [1245, 320];       // 面板最右侧：返回忍术�
       } catch (e) {
         return { ok: false, redPct: 0, area, err: e.message };
       }
+    }
+
+    /** 标准件④：忍术奖励面板**是否已打开**（判据 = 面板四周变暗）。
+     *
+     *  用户口径（2026-09-24）：「奖励界面……**周围变暗**，以这个为探针，
+     *    在点击打开奖励面板之后、点击领取之前添加这个探针」。
+     *
+     *  与 standard③ 的关系：③ 判「礼包领没领」，本方法判「面板开没开」。
+     *    **必须先过本方法**，否则 ③ 是在别的界面上读像素 ——
+     *    读数恒定不变 → 永远不满足"领满" → 无限循环
+     *    （实测 2026-09-24：193 批空转 87 分钟、539 次无效领取点击）。
+     *
+     *  实现：在面板**之外**的 5 块区域各取平均亮度，统计几块「足够暗」。
+     *  @returns {{ok:boolean, dark:number, total:number, lumas:number[]}}
+     *    ok=true ⇒ 面板已打开（5 块里 ≥4 块亮度 ≤ ARENA_PANEL_DIM_LUMA_MAX）
+     */
+    sawArenaRewardPanel() {
+      const lumas = [];
+      let dark = 0;
+      try {
+        for (const a of ARENA_PANEL_DIM_AREAS) {
+          const w = a[2] - a[0], h = a[3] - a[1];
+          const d = this.ctx.getImageData(a[0], a[1], w, h).data;
+          let s = 0, n = 0;
+          for (let i = 0; i < d.length; i += 4) { s += (d[i] * 77 + d[i + 1] * 151 + d[i + 2] * 28) >> 8; n++; }
+          const luma = s / n;
+          lumas.push(Math.round(luma));
+          if (luma <= ARENA_PANEL_DIM_LUMA_MAX) dark++;
+        }
+      } catch (e) {
+        return { ok: false, dark, total: ARENA_PANEL_DIM_AREAS.length, lumas, err: e.message };
+      }
+      return { ok: dark >= ARENA_PANEL_DIM_NEED, dark, total: ARENA_PANEL_DIM_AREAS.length, lumas };
     }
 
     /** 忍术奖励是否**已全部领完**：第 1、2 个位置都是红色「已领取」。
@@ -2830,10 +2895,17 @@ const DRAG_Y = 360;
  *    平均 ≈ 2377 px/s。即一次拖动耗时 = 行程 / 速度，不再各处写死 duration。 */
 const DRAG_SPEED_PX_S = 2377;
 
-/** 按匀速把「行程」换算成时长（ms），下限防极短拖动退化成瞬移。 */
+/** 按匀速把「行程」换算成时长（ms），下限防极短拖动退化成瞬移。
+ *  ⚠ v0.6.29：下限 120 → 400。改用 smoothstep 后中段速度 ≈ 1.5× 平均，
+ *    若总时长仍按纯匀速算（700px/2377 ≈ 294ms），中段瞬时速度会到 ~3600px/s，
+ *    反而更容易被判成 fling。故抬高下限，保证**中段峰值**仍在真人区间。 */
 function dragDurationFor(dx) {
-  return Math.max(120, Math.round(Math.abs(dx) / DRAG_SPEED_PX_S * 1000));
+  return Math.max(400, Math.round(Math.abs(dx) / DRAG_SPEED_PX_S * 1000));
 }
+
+/** 按下之后、开始移动之前的稳定时长（ms）——模拟真人「按住再拖」。
+ *  抑制「第一下手势被判成 fling 而方向乱跳」（用户实测 2026-09-24）。 */
+const DRAG_HOLD_START_MS = 120;
 
 /** 拖到最右：手右→左滑。起点取安全区右端、落点安全区左端。
  *  ⚠ 落点钳制只影响**抬起位置**（防点到边缘图标），不影响行程 —— 见 op.swipe。 */
@@ -3011,9 +3083,23 @@ async function dragScene(ctx, dir) {
       Marks.line(x1, y1, x2, y2, { duration: Math.max(markDur, Math.min(dur, 1200)) });
       this.sdk._down(x1, y1, 0);
       try {
+        // ── v0.6.29：按下后先**稳定一下**再开始移动 ──────────────────────────
+        //  真人拖动是「按下 → 停住 → 再滑」；脚本原来按下后 32ms 就开动，
+        //  首帧位移 78px（瞬时速度 ~2400px/s）→ 游戏容易把手势判成 **fling（甩动）**，
+        //  而 fling 只看「松手瞬间的速度向量」，用离散 SDK 事件重建时**第一下最容易算错**
+        //  → 表现就是「第一次拖动方向乱跳，后面几次正常」（用户实测 2026-09-24）。
+        await Utils.sleep(DRAG_HOLD_START_MS);
+        // ── v0.6.29：位移改用 **smoothstep 缓入缓出**（用户选定方案 B）──────────
+        //  原来等速线性（i/steps）：起点和终点都有速度 → 起手易触发 fling、
+        //  松手时速度最大 → fling 惯性把画面甩过头/甩反。
+        //  smoothstep  e(t)=t²(3-2t)  两端导数为 0 ⇒ **起手慢、松手慢**，中间快。
+        //  ⚠ 代价：不再是严格匀速（用户明确选择接受，换取"不乱跳"）。
+        //    速度均值仍在 DRAG_SPEED_PX_S 附近（中段最快 ≈1.5×平均）。
         for (let i = 1; i <= steps; i++) {
           await Utils.sleep(dur / steps);
-          this.sdk._move(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
+          const t = i / steps;
+          const e = t * t * (3 - 2 * t);          // smoothstep
+          this.sdk._move(x1 + (x2 - x1) * e, y1 + (y2 - y1) * e);
         }
         if (clamped) this.sdk._move(_x2, y2, 0);   // 行程已走完，轻移到安全抬起点
       } finally {
@@ -4248,6 +4334,32 @@ async function dragScene(ctx, dir) {
       this._flowIdx = -1;
       this._flowSteps = steps.length;
       Utils.log('info', `📋 流程图已展开：${name}（${steps.length} 步）`);
+      // ── v0.6.33 标准件：**每个任务的第一个动作之前统一等 1.5s** ──────────────
+      //  用户口径（2026-09-24）：「之前让你统一在所有脚本的第一步前面留 1.5s 的延迟」。
+      //
+      //  为什么放在 flow()：`flow()` 是**每个任务开头的第一个调用**（全库 28 处，
+      //    全部已是 `await ctx.flow(...)`）⇒ 在这里等一次即覆盖所有任务，
+      //    不需要在 23 个 run() 里各加一行（那正是之前只修了赠送体力/生存试炼
+      //    两个任务、其余 21 个继续踩坑的原因）。
+      //
+      //  背景：任务是被调度器一个接一个跑的，**上一个任务结束时画面可能还在收尾
+      //    （动画/弹层/返回过渡）**，紧接着点入口就会落空 —— 实测 2026-09-24：
+      //    「免费招募」第一步 `(1229,148) 打开招募` 未进入，导致后面
+      //    「普通招募」探查 score=55 全失配、任务跳过；「赠送体力」「生存试炼」同病。
+      //
+      //  ⚠ 用「任务标识」记忆上一次等待过的任务：像小队突袭/角斗场那样在**循环里**
+      //    多次调 flow() 时，同一任务只等第一次；换任务则重新等一次。
+      //  ⚠⚠ 不能直接用 name 当标识：有几处 name 含轮次变量
+      //    （`小队突袭 第 ${round}/${rounds} 场` ×3、`角斗场忍术对战（共 ${rounds} 局）`），
+      //    每轮都会变成新字符串 → 每轮都白等 1.5s。
+      //    故先把 name 里的数字抹平（`第 2/3 场` → `第 #/# 场`），使同一任务的多轮
+      //    归一到同一个标识；有 task key 时优先用 key（最稳）。
+      const waitKey = key || String(name).replace(/\d+/g, '#');
+      if (this._firstStepWaitedFor !== waitKey) {
+        this._firstStepWaitedFor = waitKey;
+        Utils.log('info', `    ⏳ 任务首步前统一等待 ${UI_WAIT_MS}ms（等上一任务收尾/画面稳定）`);
+        await Utils.sleep(UI_WAIT_MS);
+      }
       return steps.length;
     }
     /** 手动推进流程图（用于自动推进不适配的场景） */
@@ -4729,6 +4841,46 @@ async function dragScene(ctx, dir) {
     });
   }
 
+  /** 左侧菜单「上滑找目标」的**唯一定义**（v0.6.31，用户口径 2026-09-24）。
+   *
+   *  用户原话：「打开招募之后，先识别普通招募字，识别不到就往上滑动，然后再次识别，
+   *    再不行就再往上滑一次，再识别」+「每日签到的上划也改成这样，
+   *    上划一次，识别一次，上划一次识别一次」+「这上划动作也是在收尾要有加减速，
+   *    避免识别错误」。
+   *
+   *  两个任务（每日签到 collectSign / 免费招募 recruit）打开的是**同一个左侧菜单列**，
+   *  故起点/终点/次数/时长全部单点维护在这里，两边调用同一函数，不会再各自漂移。
+   *
+   *  方向：**从下往上滑**（手指上滑 → 内容上移 → 把偏下的菜单项露出来）。
+   *  收尾加减速：由 `GameOperator.swipe` 内的 **smoothstep** 统一提供
+   *  （两端导数为 0 ⇒ 起手慢、松手慢，松手速度≈0，不会触发惯性甩动导致识别错位）。
+   */
+  const MENU_UP_DRAG = { x: 88, y1: 587, y2: 100, duration: 450 };
+  const MENU_UP_DRAG_TIMES = 2;      // 最多上滑 2 次（每次后都重新识别）
+  const MENU_UP_DRAG_SETTLE_MS = 1200;   // 滑完等界面停稳再识别
+
+  /** 左侧菜单**模板搜索**的右边界（v0.6.31，用户标定 2026-09-24）。
+   *
+   *  用户口径：「如果你害怕误识别，可以加 x 轴的限定，识别限定在以下这个点的左侧」
+   *    —— 标定点 `(159,375)`（area [147,363,171,387]，tol 35）。
+   *
+   *  这是**结构性**限定（约束"这一列菜单文字有多宽"），与菜单**项数/滚动位置**无关，
+   *  不会像 `cy` 高度区间那样随版本过期。原值 175 偏右（实测文字右缘 ≈140，
+   *  175 已越过文字落到界面其它元素上）→ 收紧到 159 降低误识别。
+   *  ⚠ 模板宽 92px，窗口 x∈[8,159] 仍能容纳（模板中心最右 ~113），不影响命中。
+   */
+  const MENU_TMPL_SEARCH_X1 = 8;
+  const MENU_TMPL_SEARCH_X2 = 159;
+
+  /** 上滑一次左侧菜单（含收尾减速，见 MENU_UP_DRAG 注释）。 */
+  async function menuScrollUpOnce(ctx, logTag) {
+    Utils.log('info', `    ↕ ${logTag} → 菜单**上滑** (${MENU_UP_DRAG.x},${MENU_UP_DRAG.y1})→y=${MENU_UP_DRAG.y2}`);
+    try {
+      await ctx.op.swipe(MENU_UP_DRAG.x, MENU_UP_DRAG.y1, MENU_UP_DRAG.x, MENU_UP_DRAG.y2, MENU_UP_DRAG.duration);
+    } catch (e) { /* 视觉不可用也继续，交给调用方识别判定 */ }
+    await Utils.sleep(MENU_UP_DRAG_SETTLE_MS);
+  }
+
   // ============================================================
   //  免费招募「普通招募」页签模板：**2026-09-13 从真机招募页重抠** 92x26
   //  与「每日签到」同一套口径：页签位置/菜单项数量可变 → 模板识别为准，识别不出就跳过任务，
@@ -4961,10 +5113,29 @@ const SECRET_REALM_TICKET_DONE_EXIT = [[1224, 33], [636, 455]];
 //        依次执行"），但绝对时刻整体后移，属于预期内的统一。
 const SECRET_REALM_NAV = [
   ...sceneDragPair('right', 1765, 1500),
-  { kind: 'tap', x: 614, y: 403, dt: 2499, pre: 2000 },
+  // ⚠ v0.6.29：第 1 步由 (614,403) 改为 **(605,402)**（用户 2026-09-24 重新标定，
+  //   标定值 area [593,390,617,414] / color (87,69,36) / click (605,402)）。
+  //   旧坐标偏右 9px，导致「拖动之后的这一下」点不进秘境入口。
+  { kind: 'tap', x: 605, y: 402, dt: 2499, pre: 2000 },
   { kind: 'tap', x: 79,  y: 329, dt: 5856, pre: 2000 },
   { kind: 'tap', x: 949, y: 531, dt: 4068, pre: 3000 },
 ];
+
+// ── v0.6.29：导航**分段** + 「第 2 个场景」闸门（用户口径 2026-09-24）──────────
+//  用户原话：「增加一个第二个场景的检测，在第一下点击之后应该进入第 2 个场景，
+//    里面右上角有红叉，如果没有，就说明没进去，就回到主界面然后重来」。
+//
+//  为什么需要：`SECRET_REALM_NAV` 的后续坐标（如 (79,329)）是**按拖动后的精确画面位置**
+//    标定的。只要第 1 步 `(605,402)` 没点进秘境入口，画面没切换，第 2 步就会落在
+//    主界面左侧的「福利站」入口 (66,344) 附近 → **进错页面且回不来**
+//    （2026-09-24 实跑反复复现：(78,331)/(82,331)）。
+//  ⇒ 把「点入口」与「后续步骤」拆开，中间插一次**红叉在场检测**：
+//      · 看到红叉 ⇒ 已进入第 2 个场景（秘境页右上角有 ✕）⇒ 继续后续导航
+//      · 没看到   ⇒ 没进去 ⇒ **不盲点后续坐标**，回主界面重来
+const SECRET_REALM_NAV_ENTRY = SECRET_REALM_NAV.slice(0, SECRET_REALM_NAV.length - 2); // 拖 + 点入口
+const SECRET_REALM_NAV_AFTER = SECRET_REALM_NAV.slice(SECRET_REALM_NAV.length - 2);     // 入口之后的 2 步
+// 入口点击后等第 2 个场景渲染（红叉出现在右上角）
+const SECRET_REALM_ENTRY_SETTLE_MS = 2500;
 
 // ── 拖动落点安全区（v0.6.08）────────────────────────────────────────────
 //  用户口径（2026-09-21）：「我脚本从右往左拖动，落点太靠左边，导致点到图标了，
@@ -5888,7 +6059,7 @@ function loadRealmNameTemplates() {
           await Utils.sleep(1200);
           // 多个可领取 → 确认弹窗；领取成功 → 奖励浮层。两步都在这里吸收掉。
           await this.clearPopups(ctx);
-          await Utils.sleep(1000);
+          await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等浮层收起（原 1000）
           s2 = await this.readSlots(ctx);
           if (s2.ok && s2.slots[idx].state !== 'done') { via = tag; break; }
           if (!this.inPanel(ctx)) {
@@ -5944,7 +6115,7 @@ function loadRealmNameTemplates() {
           await ctx.op.clickNatural(MISSION.btnX, MISSION.btnY[pick.r], null, '接取任务');
           await Utils.sleep(1400);   // 弹出「选择小队」面板
           await ctx.op.clickNatural(MISSION.acceptBtn[0], MISSION.acceptBtn[1], null, '推荐小队');
-          await Utils.sleep(1000);
+          await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等小队面板（原 1000）
           await ctx.op.clickNatural(MISSION.launchBtn[0], MISSION.launchBtn[1], null, '出发');
           await Utils.sleep(1800);   // 等派遣动画 + 面板回落
         } catch (e) {
@@ -6105,7 +6276,7 @@ function loadRealmNameTemplates() {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go(COORDS.collect.mailEntry);
         await ctx.tap(COORDS.collect.mailAll);
-        await Utils.sleep(1000);   // 一键领取 → 一键删除 之间加 0.5s：等领取弹窗/列表刷新，避免连点太快漏掉删除
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等领取弹窗/列表刷新再点删除（原 1000）
         await ctx.tap(COORDS.collect.mailDelete);
         await ctx.tap(COORDS.collect.mailConfirm);
         await ctx.home();
@@ -6124,7 +6295,7 @@ function loadRealmNameTemplates() {
        *  在首页/战斗/小队突袭等 6 张其它画面上最佳 score ≥35 → 阈值 25 判别余量很大。 */
       steps: [
         { kind: 'tap', title: '打开活动页', detail: '点主界面右上「活动」入口 (1231,50)', coord: [1231, 50], color: '88,166,255' },
-        { kind: 'check', title: '定位「每月签到」菜单项', detail: '模板匹配左侧菜单「每月签到」文字（识别为准，失败再滚动重试；不做兜底盲点）', coord: null, color: '126,231,135' },
+        { kind: 'check', title: '定位「每月签到」菜单项', detail: '模板匹配左侧菜单「每月签到」；识别不到就(88,587)→y=100 上滑，最多 2 次，每次后重识别（不做兜底盲点）', coord: null, color: '126,231,135' },
         { kind: 'tap', title: '点「每月签到」菜单项', detail: '点识别到的菜单项位置（2026-09-13 实测约 (92,314)）', coord: null, color: '126,231,135' },
         { kind: 'tap', title: '点签到', detail: '点右下「签到」按钮 (1184,576)', coord: [1184, 576], color: '210,153,34' },
         { kind: 'check', title: '领奖并回主界面', detail: '等签到奖励弹窗 → 关弹窗 → goHome', coord: null, color: '188,140,255' },
@@ -6135,13 +6306,22 @@ function loadRealmNameTemplates() {
         await Utils.sleep(2500);   // 活动页加载+动画
 
         // ——— 定位「每月签到」菜单项（模板匹配；识别为准，失败不用兜底坐标）———
-        const SEARCH = [8, 90, 175, 700];   // 左侧菜单栏全列
+        const SEARCH = [MENU_TMPL_SEARCH_X1, 90, MENU_TMPL_SEARCH_X2, 700];   // 左侧菜单栏（右边界 159，见常量注释）
         let tmpl = null;
         try { tmpl = await loadSignMenuTmpl(); } catch (e) { tmpl = null; }
         const tryMatch = (tag) => {
           if (!tmpl) return null;
           try {
-            const r = ctx.vision.findTemplate(tmpl, SEARCH);
+            // ⚠ v0.6.31：**必须 step:1（逐像素）** —— 用户口径「只给招募/签到菜单这两处传」。
+            //   实测（2026-09-24，同一张招募页截图、同模板同搜索区）：
+            //     step=2（findTemplate 默认）→ score=33.9 **未命中**（阈值 25）
+            //     step=1                     → score=16.3 **命中**
+            //   实跑日志 score=33.5 与 step=2 的 33.9 吻合 ⇒ 失败原因是**采样太稀疏**：
+            //   模板是 92x26 小字，笔画仅 1~2px，而 findTemplate 搜索步长 2 且模板内部
+            //   也 `+=2` 隔点取样 → 跳过一半笔画像素，1px 对齐误差跨越笔画边界即被放大成 ~2 倍分。
+            //   代价：搜索量 ×4（本处约 3.5 万候选位 × 每点约 600 次算术 ≈ 2000 万次），
+            //   JS 几十毫秒，且每任务只调几次 —— 可接受。
+            const r = ctx.vision.findTemplate(tmpl, SEARCH, { step: 1 });
             const hit = r.ok ? [Math.round(r.cx), Math.round(r.cy)] : null;
             Utils.log('info', `    🔎 每月签到 定位[${tag}] score=${r.score} ` +
               `${hit ? '✓ 命中 (' + hit[0] + ',' + hit[1] + ')' : '✗ 未命中'}`);
@@ -6154,17 +6334,13 @@ function loadRealmNameTemplates() {
 
         let pos = tryMatch('原样');
         if (!pos) { await Utils.sleep(1000); pos = tryMatch('复检'); }
-        if (!pos) {
-          // 菜单可能被滚动过：先向下拖（内容下移，露出上面的项）
-          Utils.log('info', '    ↕ 未命中 → 菜单下拖后重试');
-          try { await ctx.op.swipe(100, 150, 140, 600, 450); } catch (e) {}
-          await Utils.sleep(1200); pos = tryMatch('下拖后');
-        }
-        if (!pos) {
-          // 再向上拖（内容上移，露出下面的项）
-          Utils.log('info', '    ↕ 仍未命中 → 菜单上拖后重试');
-          try { await ctx.op.swipe(140, 600, 100, 150, 450); } catch (e) {}
-          await Utils.sleep(1200); pos = tryMatch('上拖后');
+        // ── v0.6.31 用户口径（2026-09-24）：「每日签到的上划也改成这样 ——
+        //    上划一次，识别一次，上划一次识别一次」。
+        //  与「免费招募」共用 `menuScrollUpOnce`（定义在上方 MENU_UP_DRAG 处）：
+        //  起点/终点/次数/时长/收尾加减速全部同源，两处不会再各自漂移。
+        for (let up = 1; up <= MENU_UP_DRAG_TIMES && !pos; up++) {
+          await menuScrollUpOnce(ctx, `未命中(第 ${up}/${MENU_UP_DRAG_TIMES} 次)`);
+          pos = tryMatch(`上滑${up}次后`);
         }
 
         ctx.step('定位「每月签到」菜单项');
@@ -6244,7 +6420,7 @@ function loadRealmNameTemplates() {
         // 统一动作：拖到最左（用户 2026-09-21 口径；原来遍历 COORDS.collect.rankDrags
         //   用的是录制原始坐标 173→1589 / 211→1196，落点 1589 会越界点到右侧图标）
         await dragScene(ctx, 'left');
-        await Utils.sleep(1000);   // 等镜头滑停落位
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等镜头滑停落位（原 1000，统一为 UI_WAIT_MS）
         await ctx.go(COORDS.collect.rankEntry);
         await Utils.sleep(2000);     // 排行榜页加载（榜单刷出 + 展开动效）
         await ctx.tap(COORDS.collect.rankLike);
@@ -6330,7 +6506,7 @@ function loadRealmNameTemplates() {
        *    ③直接在「免费招募」与「确定」之间固定等 5s（替代原来的 3s）。 */
       steps: [
         { kind: 'tap', title: '打开招募', detail: '点主界面右上「招募」入口 (1229,148)', coord: [1229, 148], color: '88,166,255' },
-        { kind: 'check', title: '定位「普通招募」页签', detail: '模板匹配左侧菜单「普通招募」文字（识别为准，失败再滚动重试；不做兜底盲点）', coord: null, color: '126,231,135' },
+        { kind: 'check', title: '定位「普通招募」页签', detail: '按内容模板匹配(92x26 字形, 搜索窗 x≤159)；识别不到就(88,587)→y=100 上滑，最多 2 次，每次后重识别（不做兜底盲点）', coord: null, color: '126,231,135' },
         { kind: 'tap', title: '点「普通招募」页签', detail: '点识别到的页签位置（2026-09-13 真机实测约 (88,424)）', coord: null, color: '126,231,135' },
         { kind: 'tap', title: '免费招募', detail: '点「免费1抽」按钮 (884,579)', coord: [884, 579], color: '126,231,135' },
         { kind: 'tap', title: '点「确定」', detail: '等 5s 招募动画+结果界面 → 点「确定」(429,571)', coord: [429, 571], color: '210,153,34' },
@@ -6342,13 +6518,17 @@ function loadRealmNameTemplates() {
         await Utils.sleep(2500);   // 招募页加载
 
         // ——— 定位「普通招募」页签（模板匹配；识别为准，不用兜底坐标）———
-        const SEARCH = [8, 90, 175, 700];   // 左侧菜单栏全列
+        const SEARCH = [MENU_TMPL_SEARCH_X1, 90, MENU_TMPL_SEARCH_X2, 700];   // 左侧菜单栏（右边界 159，见常量注释）
         let tmpl = null;
         try { tmpl = await loadRecruitTabTmpl(); } catch (e) { tmpl = null; }
         const tryMatch = (tag) => {
           if (!tmpl) return null;
           try {
-            const r = ctx.vision.findTemplate(tmpl, SEARCH);
+            // ⚠ v0.6.31：**必须 step:1（逐像素）** —— 与「每月签到」同一处置（用户口径
+            //   「只给招募/签到菜单这两处传」）。实测同一张招募页截图：
+            //   step=2 → 33.9 未命中 / step=1 → 16.3 命中（阈值 25）；
+            //   实跑 score=33.5 与 step=2 吻合 ⇒ 小字笔画被隔点采样跳过导致分数虚高。
+            const r = ctx.vision.findTemplate(tmpl, SEARCH, { step: 1 });
             const hit = r.ok ? [Math.round(r.cx), Math.round(r.cy)] : null;
             Utils.log('info', `    🔎 普通招募 定位[${tag}] score=${r.score} ` +
               `${hit ? '✓ 命中 (' + hit[0] + ',' + hit[1] + ')' : '✗ 未命中'}`);
@@ -6361,43 +6541,30 @@ function loadRealmNameTemplates() {
 
         let pos = tryMatch('原样');
         if (!pos) { await Utils.sleep(1000); pos = tryMatch('复检'); }
-        // 2026-09-14 新增第二识别路径：白色文字行聚类。
-        //  背景：云端视频流 720p→1080p，文字重采样抗锯齿变化，SAD 模板分 0→~29 卡死在阈值 25
-        //  （现场帧实测 28.7，位置完全正确仍判未命中）。findTextRows 只认「灰度>170 且低饱和的白字行」，
-        //  对清晰度/重采样不敏感；2026-09-12 已验证「普通招募 = 左侧菜单最后一个白色文字簇」。
-        const tryTextRows = (tag) => {
-          try {
-            // 扫描区收窄 x∈[30,155]：避开页签右缘亮边（x161-166，恒定 ~6px/行白基线
-            //  会把整列连成一个 460 行高的大簇，2026-09-14 现场帧实测）
-            const r = ctx.vision.findTextRows([30, 90, 155, 700]);
-            if (!r.ok || !r.clusters.length) {
-              Utils.log('info', `    🔎 普通招募 文字行[${tag}] 无白色文字簇`);
-              return null;
-            }
-            const c = r.clusters[r.clusters.length - 1];   // 普通招募 = 最后一簇
-            if (c.cy < 350 || c.cy > 500) {                // 合理范围校验，防识别异常点错
-              Utils.log('warn', `    ⚠ 普通招募 文字行[${tag}] 最后一簇 cy=${Math.round(c.cy)} 超出合理范围 → 弃用`);
-              return null;
-            }
-            Utils.log('info', `    🔎 普通招募 文字行[${tag}] ✓ 最后一簇 (${Math.round(c.cx)},${Math.round(c.cy)})，共 ${r.clusters.length} 簇`);
-            return [Math.round(c.cx), Math.round(c.cy)];
-          } catch (e) {
-            Utils.log('warn', `    ⚠ 普通招募 文字行[${tag}] 异常：${(e && e.message) || e}`);
-            return null;
-          }
-        };
-        if (!pos) pos = tryTextRows('模板未中');
-        if (!pos) {
-          // 菜单可能被滚动过：先向下拖（内容下移，露出上面的项）
-          Utils.log('info', '    ↕ 未命中 → 菜单下拖后重试');
-          try { await ctx.op.swipe(100, 150, 140, 600, 450); } catch (e) {}
-          await Utils.sleep(1200); pos = tryMatch('下拖后'); if (!pos) pos = tryTextRows('下拖后');
-        }
-        if (!pos) {
-          // 再向上拖（内容上移，露出下面的项）
-          Utils.log('info', '    ↕ 仍未命中 → 菜单上拖后重试');
-          try { await ctx.op.swipe(140, 600, 100, 150, 450); } catch (e) {}
-          await Utils.sleep(1200); pos = tryMatch('上拖后'); if (!pos) pos = tryTextRows('上拖后');
+        // ⚠ v0.6.31 已删除「文字行取最后一簇」兜底（用户口径 2026-09-24：
+        //   「这个我一开始就给你说还是要**内容识别**，不要用取最后一簇」）。
+        //
+        //  为什么删：
+        //    · **按内容识别 = 模板匹配**（拿 92x26「普通招募」字形去比），就是上面的 tryMatch。
+        //    · 原兜底 `findTextRows` 只认「灰度>170 且低饱和的白字行」这个**形状特征**，
+        //      **根本不知道内容是什么** —— 于是只能靠「左侧菜单最后一个簇」来猜。
+        //      而菜单项会增删（2026-09-24 实测已从 6 项增至 8 项），
+        //      一旦「普通招募」下面再加一项，这个兜底就会点错到新项上。
+        //    · 兜底当初的存在理由（云端 720p→1080p 重采样使 SAD 卡在阈值 25）**已被覆盖**：
+        //      模板搜索窗右边界已按用户标定收紧到 159（MENU_TMPL_SEARCH_X2），
+        //      现在 score 偏高是**真的字形不匹配**，而不是"位置对但分数虚高"。
+        //
+        //  ⇒ 定位只走「按内容」的模板匹配：命中即点，不中就上滑重试，仍不中则跳过本任务。
+        // ── v0.6.31 用户口径（2026-09-24）─────────────────────────────────────
+        //  「打开招募之后，先识别普通招募字，识别不到就**往上滑动**，然后再次识别；
+        //    再不行就**再往上滑一次**，再识别」。
+        //  与「每日签到」共用 `menuScrollUpOnce`（定义在上方 MENU_UP_DRAG 处）：
+        //  起点/终点/次数/时长/收尾加减速全部同源，两处不会再各自漂移。
+        //  ⚠ 旧实现先 `swipe(100,150 → 140,600)`（向下拖）再反向上拖，
+        //    方向与用户口径相反 —— 菜单滚到下面时才需要上滑，下拖会把目标推更远。
+        for (let up = 1; up <= MENU_UP_DRAG_TIMES && !pos; up++) {
+          await menuScrollUpOnce(ctx, `未命中(第 ${up}/${MENU_UP_DRAG_TIMES} 次)`);
+          pos = tryMatch(`上滑${up}次后`);
         }
 
         ctx.step('定位「普通招募」页签');
@@ -6464,8 +6631,8 @@ function loadRealmNameTemplates() {
        *  2026-09-13 步骤名按用户口径更正为「一键领取 / 点确认 / 一键赠送 / 关闭红叉」，
        *  并修 2→3 步无延时导致「点确认」点空（录制间隔 1.39s，原为 0s 背靠背点击） */
       steps: [
-        { kind: 'tap', title: '打开体力页', detail: '点主界面左侧体力入口 (60,211)', coord: [60, 211], color: '88,166,255' },
-        { kind: 'tap', title: '一键领取', detail: '点「一键领取」(521,589)', coord: [521, 589], color: '126,231,135' },
+        { kind: 'tap', title: '打开体力页', detail: '等 1.5s 后点好友/体力入口 (60,211)', coord: [60, 211], color: '88,166,255' },
+        { kind: 'tap', title: '一键领取', detail: '等 2s 后点「一键领取」(521,589)（等好友/体力面板渲染完）', coord: [521, 589], color: '126,231,135' },
         { kind: 'tap', title: '点确认', detail: '点「确认」(626,452)；与上一步间隔 1.5s（等确认弹窗刷出）', coord: [626, 452], color: '210,153,34' },
         { kind: 'tap', title: '一键赠送', detail: '点「一键赠送」(340,595)', coord: [340, 595], color: '126,231,135' },
         { kind: 'tap', title: '关闭红叉', detail: '点右上红✕ (1185,106)；与上一步间隔 2s（等赠送结算动画走完）', coord: [1185, 106], color: '248,81,73' },
@@ -6473,15 +6640,21 @@ function loadRealmNameTemplates() {
       ],
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
+        // v0.6.29 延时按用户口径定稿（2026-09-24）：
+        //   「打开体力页之前延时 1.5s」「一键领取前延时 2s」。
+        //   背景：实测 1s 太短 —— 好友/体力面板还没渲染完就点「一键领取」→ 点击落空，
+        //   后续「点确认 / 一键赠送 / 关闭红叉」全在未打开的界面上空点，任务白跑被中止。
+        //   ⚠ v0.6.33：「打开体力页之前」的那 1.5s 已上收为 flow() 标准件
+        //     （每个任务首步前统一等待），此处不再重复，避免等 2 次共 3s。
         await ctx.go([60, 211], null, '打开体力页');
-        await Utils.sleep(1000);   // 第1→2 步：等体力页弹窗加载完再点「一键领取」
+        await Utils.sleep(2000);   // ★ 点「一键领取」之前（等好友/体力面板渲染完）
         await ctx.tap([521, 589], null, '一键领取');
-        await Utils.sleep(1500);  // 第2→3 步【本次修复】：等「一键领取」的确认弹窗刷出后再点确认
-                                  //   此前该处无延时（背靠背点击），确认按钮还没渲染 → 点击落空
+        await Utils.sleep(1500);   // 第2→3 步：等「一键领取」的确认弹窗刷出后再点确认
+                                   //   此前该处无延时（背靠背点击），确认按钮还没渲染 → 点击落空
         await ctx.tap([626, 452], null, '点确认');
-        await Utils.sleep(2000);  // 第3→4 步：确认/结算动画
+        await Utils.sleep(2000);   // 第3→4 步：确认/结算动画
         await ctx.tap([340, 595], null, '一键赠送');
-        await Utils.sleep(2000);  // 第4→5 步：等赠送动画走完再关页（过早关闭可能取消赠送）
+        await Utils.sleep(2000);   // 第4→5 步：等赠送动画走完再关页（过早关闭可能取消赠送）
         await ctx.tap([1185, 106], null, '关闭红叉');
         await ctx.home();
 
@@ -6513,10 +6686,9 @@ function loadRealmNameTemplates() {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go([1232, 53], null, '打开一乐拉面');   // go 自带 pageLoad 等待 1.8~3.2s（录制 2.45s）
         await ctx.tap([348, 351], null, '选拉面');
-        await Utils.sleep(1000);   // 第2→3 步【本次修复】：此前 0 延时 → 选面后界面还没切完就点「吃拉面」
-                                   //   delay.click 已保证 ≥1s，这里再加 1s 保险（录制间隔 1.09s）
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等选面后界面切完再点「吃拉面」（原 1000）
         await ctx.tap([728, 363], null, '吃拉面');
-        await Utils.sleep(1000);   // 第3→4 步【本次修复】：此前 0 延时 → 等吃面动画/确认弹窗刷出（录制 1.01s）
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等吃面动画/确认弹窗刷出（原 1000）
         await ctx.tap([1103, 364], null, '确认领取');
         await ctx.home();
 
@@ -6795,7 +6967,7 @@ function loadRealmNameTemplates() {
             if (!hit) break;
             ctx.step('勾选本周不再提示'); ctx.stepResult(true);
             await ctx.tap([575, 485], null, '勾选本周不再提示');
-            await Utils.sleep(1000);
+            await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等勾选生效（原 1000）
             ctx.step('继续出战'); ctx.stepResult(true);
             await ctx.tap([529, 412], null, '继续出战');
             await Utils.sleep(2000);
@@ -6901,26 +7073,27 @@ function loadRealmNameTemplates() {
 
         // ——— 进页面（与 squadRaid 同参数，均已实测）———
         await dragScene(ctx, 'right');   // 拖到最右（标准件）
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等镜头滑停落位（原无延时）
         await ctx.go([779, 285], null, '打开小队突袭');
         await Utils.sleep(3000);   // 队伍页加载（与 squadRaid 一致）
 
         // ——— 组织助战 → 我的助战 → 领取 ———
         await ctx.tap([1013, 661], null, '组织助战');
-        await Utils.sleep(1000);
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：原 1000
         await ctx.tap([885, 649], null, '我的助战');
-        await Utils.sleep(1000);
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：原 1000
         await ctx.tap([681, 587], null, '领取助战收益');
         await Utils.sleep(1500);   // 领取动画 / 收益数字刷新
 
         // ——— 收尾：关两层面板 → 若有「离开队伍」确认框点确定 → 回主界面 ———
         await ctx.tap([1221, 33], null, '关闭助战忍者页');
-        await Utils.sleep(1000);
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：原 1000
         await ctx.tap([1225, 33], null, '关闭小队突袭页');
-        await Utils.sleep(1000);
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等「离开队伍」弹窗刷出（原 1000）
         // 录制里此处必有弹窗；实际没有时 (649,448) 打在角色立绘上（实测 RGB 50,59,56）无副作用，
         // 因此不写条件分支，避免"弹窗在但场景没识别出来 → 跳过 → 卡住"。
         await ctx.tap([649, 448], null, '确定离开队伍');
-        await Utils.sleep(1000);
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等离队动画（原 1000）
         await ctx.home();
       },
     },
@@ -6931,7 +7104,7 @@ function loadRealmNameTemplates() {
        *  2026-09-12 生存试炼.json 全流程重录：进生存挑战 → 重置回新一轮 → 开始扫荡 → 确认到底 → 等 40s → 红✕返回 */
       steps: [
         { kind: 'drag', title: '主场景拖到最左', detail: '标准件 dragScene：拖到最左（内部多次+1s缓冲）', coord: null, color: '88,166,255' },
-        { kind: 'tap', title: '打开生存试炼', detail: '点入口 (569,145)', coord: [569, 145], color: '88,166,255' },
+        { kind: 'tap', title: '打开生存试炼', detail: '点入口 (538,146)（2026-09-24 重标定：原 (569,145) 偏右会点空）', coord: [538, 146], color: '88,166,255' },
         { kind: 'tap', title: '选生存挑战', detail: '双入口页点「生存挑战」(881,334)', coord: [881, 334], color: '88,166,255' },
         { kind: 'tap', title: '点重置', detail: '点底部「重置」(889,660)', coord: [889, 660], color: '210,153,34' },
         { kind: 'tap', title: '确认重置', detail: '重置弹窗点「确定」(655,448)', coord: [655, 448], color: '210,153,34' },
@@ -6947,9 +7120,12 @@ function loadRealmNameTemplates() {
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await dragScene(ctx, 'right');   // 拖到最右（标准件）
-        await Utils.sleep(1000);    // 录制间隔 1.14s
-        await ctx.go([569, 145], null, '打开生存试炼');
-        await Utils.sleep(1000);    // 录制间隔 1.39s
+        // v0.6.29：1000 → UI_WAIT_MS(1500)。实测（2026-09-24 trace）：拖完屏只等 1s
+        //   就点入口 → 「打开生存试炼」落空，scene 仍是 home，
+        //   导致后续「选生存挑战/重置/确认重置」全在主界面上空点，整任务白跑。
+        await Utils.sleep(UI_WAIT_MS);
+        await ctx.go([538, 146], null, '打开生存试炼');
+        await Utils.sleep(UI_WAIT_MS);    // 等试炼页加载
         await ctx.tap([881, 334], null, '选生存挑战');
         await Utils.sleep(1700);   // 录制间隔 2.22s
         await ctx.tap([889, 660], null, '点重置');
@@ -6957,13 +7133,13 @@ function loadRealmNameTemplates() {
         await ctx.tap([655, 448], null, '确认重置');
         await Utils.sleep(2000);   // 录制间隔 2.46s
         await ctx.tap([767, 645], null, '开始扫荡');
-        await Utils.sleep(1000);    // 录制间隔 1.28s
+        await Utils.sleep(UI_WAIT_MS);   // 等扫荡确认弹窗
         await ctx.tap([769, 647], null, '再点开始扫荡');
-        await Utils.sleep(1000);    // 录制间隔 1.32s
+        await Utils.sleep(UI_WAIT_MS);   // 等名单/准备界面
         await ctx.tap([641, 596], null, '准备就绪');
-        await Utils.sleep(1000);    // 录制间隔 1.07s
+        await Utils.sleep(UI_WAIT_MS);   // 等出战名单弹窗
         await ctx.tap([639, 464], null, '出战名单确定');
-        await Utils.sleep(1000);   // 录制间隔 1.51s
+        await Utils.sleep(UI_WAIT_MS);   // 等扫荡券提示
         await ctx.tap([508, 457], null, '扫荡券确认');
         await Utils.sleep(40000);  // 扫荡执行约 38.5s（录制实测），留余量
         await ctx.tap([1236, 33], null, '关闭返回');
@@ -7017,7 +7193,39 @@ function loadRealmNameTemplates() {
         //   退出条件：刷满 SECRET_REALM_ROUNDS 场；或连续进不去战斗 / 战斗卡住累计达上限 → 停手退出。
         await ctx.home();
         Utils.log('info', `🌀 秘境挑战：回主界面→导航到准备界面（只做一次；匹配由循环负责）`);
-        await ctx.replaySeq(SECRET_REALM_NAV, { label: '导航到秘境准备界面' });
+        // ★ v0.6.29：导航分段 + 第 2 场景闸门（用户口径 2026-09-24）：
+        //   「第一下点击之后应该进入第 2 个场景，里面右上角有红叉；如果没有，
+        //     就说明没进去，就回到主界面然后重来」。红叉复用既有标准件 sawRedX()。
+        //   抽成 realmNavGated() 是因为后面还有 2 处「重新导航」也要走同一道闸门。
+        const realmNavGated = async (tag) => {
+          for (let navTry = 1; navTry <= 2; navTry++) {
+            if (navTry > 1) {
+              Utils.log('warn', `   ↻ [${tag}] 第 ${navTry} 次导航尝试（上次没进第 2 场景）`);
+              await ctx.home();
+            }
+            await ctx.replaySeq(SECRET_REALM_NAV_ENTRY, { label: `[${tag}] 导航①拖到最右并点秘境入口` });
+            await Utils.sleep(SECRET_REALM_ENTRY_SETTLE_MS);   // 等第 2 场景（右上角红叉）渲染
+            const rx = ctx.vision.sawRedX();
+            if (!rx.ok) {
+              Utils.log('warn', `   ⚠ [${tag}] 点完秘境入口后**没看到右上角红叉**（dist=${rx.dist}）` +
+                ` → 判定没进第 2 场景 → 不点后续坐标，回主界面重来（防误入福利站等页面）`);
+              continue;
+            }
+            Utils.log('info', `   ✓ [${tag}] 已进入第 2 场景（右上角红叉 dist=${rx.dist}）→ 继续后续导航`);
+            await ctx.replaySeq(SECRET_REALM_NAV_AFTER, { label: `[${tag}] 导航②进入秘境准备界面` });
+            return true;
+          }
+          Utils.log('warn', `   ⚠ [${tag}] 连续 2 次都没进入第 2 场景 → 放弃导航`);
+          return false;
+        };
+        if (!(await realmNavGated('首次导航'))) {
+          // ⚠ v0.6.29：这里**不能直接 return** —— 本任务 run() 无返回值语义，
+          //   正常出口是「走到函数末尾 await ctx.home()」。直接 return 会把画面
+          //   留在错误页（正是我们要避免的）。故先回主界面再退出。
+          Utils.log('warn', '   ⚠ 首次导航就进不去第 2 场景 → 本轮放弃（交给外层重试/下一轮）');
+          await ctx.home();
+          return;
+        }
         // NAV 末步落点后画面要渲染出「挑战券 N」才读得到（实跑 12:58:55 点完 NAV、
         // 12:58:56 立刻读券 → best=Infinity 全失配）。这里补一次稳定等待，
         // 让首次读券与后续每轮（点匹配前画面早已稳定）的条件一致。
@@ -7065,7 +7273,7 @@ function loadRealmNameTemplates() {
               ` → 画面不在准备界面，回主界面重导航（不读券、不当成券=0）`);
             try {
               await ctx.home();
-              await ctx.replaySeq(SECRET_REALM_NAV, { label: '不在准备界面 → 重新导航' });
+              await realmNavGated('不在准备界面→重导航');
               await Utils.sleep(SECRET_REALM_EXIT_SETTLE);
             } catch (e) {
               Utils.log('warn', `  重导航失败: ${e.message}`);
@@ -7129,7 +7337,7 @@ function loadRealmNameTemplates() {
               });
               zeroStreak = 0;
               await ctx.home();
-              await ctx.replaySeq(SECRET_REALM_NAV, { label: '读不到券数后重新导航' });
+              await realmNavGated('读不到券数→重导航');
               continue;      // 回循环顶部重读券（受 matchTries 上界保护）
             }
           }
@@ -7729,13 +7937,22 @@ function loadRealmNameTemplates() {
           Utils.log('info', `🔍 [${tag}] 打开奖励面板，检查今日是否已领完`);
           await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
           await Utils.sleep(1800);          // 面板展开动画
+          // ★ v0.6.30：先确认面板**真的开了**（判据 = 四周变暗），再读礼包状态。
+          //   没开 → 不读（读了也是别的界面的像素）→ 用红叉位还原 → 交调用方回主界面。
+          const pnl = ctx.vision.sawArenaRewardPanel();
+          if (!pnl.ok) {
+            Utils.log('warn', `🔍 [${tag}] ⚠ 奖励面板**没打开**（暗块 ${pnl.dark}/${pnl.total}，` +
+              `亮度 ${pnl.lumas.join('/')}）→ 不读状态`);
+            return { opened: false, done: false };
+          }
+          Utils.log('info', `🔍 [${tag}] ✓ 奖励面板已打开（暗块 ${pnl.dark}/${pnl.total}）`);
           const st = ctx.vision.arenaRewardsAllClaimed();
           Utils.log('info', `🔍 [${tag}] 奖励状态：第1个红=${st.first.redPct}%(${st.first.ok ? '已领' : '未领'}) ` +
             `第2个红=${st.second.redPct}%(${st.second.ok ? '已领' : '未领'})`);
           // 还原界面：点最右回忍术对战准备界面
           await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1], null, '返回忍术对战界面');
           await Utils.sleep(1800);
-          return st.done;
+          return { opened: true, done: st.done };
         };
 
         /**
@@ -7747,13 +7964,34 @@ function loadRealmNameTemplates() {
          *    故本函数**先点最右还原界面，再返回结果**（不再是"领满就直接 return"）。
          *    否则领满时会停在奖励面板上，后续 waitArenaReady / 下一批都接不上。
          *
-         *  @returns {Promise<boolean>} true = 四个礼包已全部领取
+         *  ⚠ v0.6.30：**打开面板后先探测「面板是否真的开了」**（四周变暗），
+         *    确认开了才点那 4 次领取。没开就**不点领取**（点了也是白点，且会污染状态），
+         *    改用**右上角红叉位**还原（点错也无害 —— 用户口径），并返回 `{opened:false}`。
+         *    根因：这条流程原先全程盲点，(793,642) 没开面板时 4 次「领取」全落空、
+         *    礼包读数恒定 → 永远不满足"领满" → 实测 193 批空转 87 分钟。
+         *
+         *  @returns {Promise<{opened:boolean, done:boolean}>}
+         *    opened=false ⇒ 面板没打开（调用方应回主界面重新完整执行）；
+         *    opened=true  ⇒ 面板已开，done 表示四个礼包是否已全部领取
          */
         const claimArenaRewards = async (tag) => {
           ctx.op.releaseHold();
           Utils.log('info', `🎁 [${tag}] 打开忍术奖励面板`);
           await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
           await Utils.sleep(1800);          // 面板展开动画
+
+          // ★ 探针：面板开了吗？（判据 = 四周变暗）
+          const pnl = ctx.vision.sawArenaRewardPanel();
+          if (!pnl.ok) {
+            Utils.log('warn', `🎁 [${tag}] ⚠ 奖励面板**没打开**（暗块 ${pnl.dark}/${pnl.total}，` +
+              `亮度 ${pnl.lumas.join('/')}）→ 不点领取，改用右上角红叉位还原界面`);
+            // 用户口径：「把这个流程的点最右改成点右上角红x的位置，这样点错也没关系」
+            const [cx, cy] = PROBES.closeX.click;
+            await ctx.op.clickNatural(cx, cy, null, '还原界面（点右上角红叉位）');
+            await Utils.sleep(1500);
+            return { opened: false, done: false };
+          }
+          Utils.log('info', `🎁 [${tag}] ✓ 奖励面板已打开（暗块 ${pnl.dark}/${pnl.total}）→ 开始领取`);
 
           // 按录制点击 4 次（前 3 个补位同一行）
           for (let i = 0; i < ARENA_REWARD_CLAIMS.length; i++) {
@@ -7776,13 +8014,21 @@ function loadRealmNameTemplates() {
           Utils.log('info', `🎁 [${tag}] 点最右 → 回战斗准备界面`);
           await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1], null, '返回忍术对战界面');
           await Utils.sleep(1800);
-          return st.done;
+          return { opened: true, done: st.done };
         };
 
         // ★ v0.6.27 首次进场先查「今天是否已领完」（用户口径）：
         //   已领完 ⇒ 今天的忍术奖励任务已完成 ⇒ **跳过全部战斗**，直接结束回桌面。
         //   未领完 ⇒ 进入「打 N 局 → 看一次面板」的批量循环。
-        if (await peekArenaRewards('首次进场')) {
+        //   ⚠ v0.6.30：peek 现在返回 {opened, done} —— 面板**没打开**时不能当成"未领完"
+        //     就往下打（那会在错误界面上打），而要回主界面重新完整执行（用户口径）。
+        const peek = await peekArenaRewards('首次进场');
+        if (!peek.opened) {
+          Utils.log('warn', '🎁 ⚠ 首次进场连奖励面板都没打开 → 回主界面重新完整执行');
+          await ctx.home();
+          return;
+        }
+        if (peek.done) {
           Utils.log('info', '🎁 ✓ 今天忍术奖励已全部领完 → 跳过战斗，直接回桌面');
           ctx.step('今日已完成，跳过战斗'); ctx.stepResult(true);
           // ⚠ 不调 clearSettlement()（见文件末尾同一处说明：非结算页会空转 8 秒）
@@ -7831,7 +8077,16 @@ function loadRealmNameTemplates() {
           }
 
           // ② 本批打完 → 领取奖励（内部会点最右还原界面）
-          if (await claimArenaRewards(`第 ${batch} 批打完后`)) {
+          const cl = await claimArenaRewards(`第 ${batch} 批打完后`);
+          if (!cl.opened) {
+            // ★ v0.6.30（用户口径）：「探测失败就返回主界面，重新完整执行」。
+            //   面板没打开说明画面已经不对（打也打不成、领也领不到），
+            //   继续在这个界面上开下一批只会像上次那样空转 100+ 批。
+            Utils.log('warn', `🎁 第 ${batch} 批后奖励面板没打开 → 回主界面，重新完整执行本任务`);
+            await ctx.home();
+            return;
+          }
+          if (cl.done) {
             Utils.log('info', `🎁 第 ${batch} 批后奖励已全部领完 → 结束（共 ${batch} 批）`);
             break;
           }
@@ -7865,7 +8120,7 @@ function loadRealmNameTemplates() {
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await dragScene(ctx, 'left');   // 拖到最左（标准件）
-        await Utils.sleep(1000);   // 校准间隔 1.56s
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等镜头滑停落位（原 1000）
         await ctx.tap([548, 166], null, '点「积分赛」入口');
         await Utils.sleep(3000);   // 进页面 + 段位奖励自动领取
         await ctx.home();
@@ -7894,7 +8149,7 @@ function loadRealmNameTemplates() {
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await dragScene(ctx, 'right');   // 拖到最右（标准件）
-        await Utils.sleep(1000);    // 校准间隔 0.4s
+        await Utils.sleep(UI_WAIT_MS);   // v0.6.29：等镜头滑停落位（原 1000）
         await ctx.go([543, 144], null, '打开试炼之地');
         await Utils.sleep(1500);   // 校准间隔 1.6s
         await ctx.tap([392, 323], null, '选「修行之路」');
