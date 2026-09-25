@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.33
+// @version      0.6.34
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.33'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.34'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1542,6 +1542,12 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
      *  @returns {{ok:boolean, redPct:number, area:number[]}} ok=true = 该位置是红色「已领取」
      */
     sawArenaRewardClaimed(areaIdx) {
+      // ⚠ v0.6.34：必须先 `_fresh()` 刷新帧！本方法直接读 `this.ctx` 的像素，
+      //   而画布**不会自动跟帧** —— 不刷新就会读到**上一次捕获的陈旧画面**
+      //   （全库其它读像素的方法 match/sawRedX/sawBattlePause/findTemplate/
+      //    findTextRows 都在开头调了 `_fresh()`，见 0.5.42 的注释
+      //    「不再依赖调用方先截图，避免读到旧帧导致静默判定失败」）。
+      this._fresh();
       const area = ARENA_REWARD_STATUS_AREAS[areaIdx === 1 ? 1 : 0];
       try {
         const w = area[2] - area[0], h = area[3] - area[1];
@@ -1574,6 +1580,11 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
      *    ok=true ⇒ 面板已打开（5 块里 ≥4 块亮度 ≤ ARENA_PANEL_DIM_LUMA_MAX）
      */
     sawArenaRewardPanel() {
+      // ⚠ v0.6.34：同 sawArenaRewardClaimed —— 必须先刷新帧，否则读到陈旧画面。
+      //   实测（2026-09-25 11:35）后果：面板明明已打开（截图实测 5 块亮度 60/65/21/7/20 全暗），
+      //   脚本却报「暗块 1/5，亮度 127/137/79/106/114」（全是亮值）→ 误判"没打开"
+      //   → 回主界面白跑一轮。
+      this._fresh();
       const lumas = [];
       let dark = 0;
       try {
