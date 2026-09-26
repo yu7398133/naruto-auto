@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.34
+// @version      0.6.35
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.34'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.35'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -7936,37 +7936,6 @@ function loadRealmNameTemplates() {
         };
 
         /**
-         * v0.6.27：**只读**探测「今天的忍术奖励是否已全部领完」（不点任何领取）。
-         *   用途：首次进场时先看今天是否已完成 —— 已完成就直接跳过全部战斗、结束回桌面
-         *   （用户口径 2026-09-23：「第一次进入的时候也先进这个奖励面板，看今天的任务是否已完成，
-         *   已完成就跳过战斗，直接结束回桌面」）。
-         *   末尾**点最右回准备界面**，把界面还原给调用方（无论后续打不打）。
-         *  @returns {Promise<boolean>} true = 已全部领完（今天不用打了）
-         */
-        const peekArenaRewards = async (tag) => {
-          ctx.op.releaseHold();
-          Utils.log('info', `🔍 [${tag}] 打开奖励面板，检查今日是否已领完`);
-          await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
-          await Utils.sleep(1800);          // 面板展开动画
-          // ★ v0.6.30：先确认面板**真的开了**（判据 = 四周变暗），再读礼包状态。
-          //   没开 → 不读（读了也是别的界面的像素）→ 用红叉位还原 → 交调用方回主界面。
-          const pnl = ctx.vision.sawArenaRewardPanel();
-          if (!pnl.ok) {
-            Utils.log('warn', `🔍 [${tag}] ⚠ 奖励面板**没打开**（暗块 ${pnl.dark}/${pnl.total}，` +
-              `亮度 ${pnl.lumas.join('/')}）→ 不读状态`);
-            return { opened: false, done: false };
-          }
-          Utils.log('info', `🔍 [${tag}] ✓ 奖励面板已打开（暗块 ${pnl.dark}/${pnl.total}）`);
-          const st = ctx.vision.arenaRewardsAllClaimed();
-          Utils.log('info', `🔍 [${tag}] 奖励状态：第1个红=${st.first.redPct}%(${st.first.ok ? '已领' : '未领'}) ` +
-            `第2个红=${st.second.redPct}%(${st.second.ok ? '已领' : '未领'})`);
-          // 还原界面：点最右回忍术对战准备界面
-          await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1], null, '返回忍术对战界面');
-          await Utils.sleep(1800);
-          return { opened: true, done: st.done };
-        };
-
-        /**
          * v0.6.27：领取忍术对战奖励（用户口径 2026-09-23）。
          *   打开面板 → 点 4 次领取 → 探测第 1、2 个礼包是否都已领取(红)
          *
@@ -8013,13 +7982,27 @@ function loadRealmNameTemplates() {
           await Utils.sleep(1000);          // 等领取动画/状态刷新
 
           const st = ctx.vision.arenaRewardsAllClaimed();
-          Utils.log('info', `🎁 [${tag}] 奖励状态：第1个红=${st.first.redPct}%(${st.first.ok ? '已领' : '未领'}) ` +
+          Utils.log('info', `🎁 [${tag}] 奖励状态(点完后)：第1个红=${st.first.redPct}%(${st.first.ok ? '已领' : '未领'}) ` +
             `第2个红=${st.second.redPct}%(${st.second.ok ? '已领' : '未领'})`);
 
           if (st.done) {
             Utils.log('info', `🎁 [${tag}] ✓ 第 1、2 个均已领取 → 四个礼包领完`);
           } else {
-            Utils.log('info', `🎁 [${tag}] 仍有未完成礼包 → 稍后再打一批`);
+            // ★ v0.6.35（用户口径 2026-09-26）：「**点完之后还要再识别一次**，
+            //   看是不是已领取完的判定」—— 领取动画/状态刷新可能慢于 1s，
+            //   首次读到的可能还是"未领"（旧值）→ 这里再复检一次，避免误判"没领到"
+            //   而白打一批。两次都读同一套判据（arenaRewardsAllClaimed）。
+            Utils.log('info', `🎁 [${tag}] 首次读未领满 → 复检一次（等状态刷新）`);
+            await Utils.sleep(1200);
+            const st2 = ctx.vision.arenaRewardsAllClaimed();
+            Utils.log('info', `🎁 [${tag}] 奖励状态(复检)：第1个红=${st2.first.redPct}%(${st2.first.ok ? '已领' : '未领'}) ` +
+              `第2个红=${st2.second.redPct}%(${st2.second.ok ? '已领' : '未领'})`);
+            if (st2.done) {
+              Utils.log('info', `🎁 [${tag}] ✓ 复检确认第 1、2 个均已领取 → 四个礼包领完`);
+              st.done = true;
+            } else {
+              Utils.log('info', `🎁 [${tag}] 复检仍未领满 → 稍后再打一批`);
+            }
           }
           // ★ 无论领满与否，都必须点最右回到战斗准备界面（用户口径）
           Utils.log('info', `🎁 [${tag}] 点最右 → 回战斗准备界面`);
@@ -8031,9 +8014,16 @@ function loadRealmNameTemplates() {
         // ★ v0.6.27 首次进场先查「今天是否已领完」（用户口径）：
         //   已领完 ⇒ 今天的忍术奖励任务已完成 ⇒ **跳过全部战斗**，直接结束回桌面。
         //   未领完 ⇒ 进入「打 N 局 → 看一次面板」的批量循环。
-        //   ⚠ v0.6.30：peek 现在返回 {opened, done} —— 面板**没打开**时不能当成"未领完"
-        //     就往下打（那会在错误界面上打），而要回主界面重新完整执行（用户口径）。
-        const peek = await peekArenaRewards('首次进场');
+        //
+        //  ⚠ v0.6.35：首次进场**改用 claimArenaRewards（和循环里完全一样）**，
+        //    不再只读 peek。用户口径（2026-09-26）：「**第一次也要点的，这个要和循环一样**」。
+        //    行为差异：
+        //      · 旧（peek）：只读状态 → 未领完就**直接去打**，面板里可领的礼包一次都没点
+        //        （实测 11:17:52 打开了面板、看到"未领"，却一次领取都没点就进战斗）。
+        //      · 新（claim）：打开面板 → **点 4 次领取** → 读状态 → 点最右还原。
+        //        未领完则照旧进战斗循环（打完再领）。
+        //    ⇒ 首次进场与每一批收尾走**同一条**领奖路径，不再有两套行为。
+        const peek = await claimArenaRewards('首次进场');
         if (!peek.opened) {
           Utils.log('warn', '🎁 ⚠ 首次进场连奖励面板都没打开 → 回主界面重新完整执行');
           await ctx.home();
