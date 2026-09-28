@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.35
+// @version      0.6.38
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.35'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.38'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -211,6 +211,7 @@
       stableFrames: 3,      // 连续静止帧数
       poll: 1200,           // 轮询间隔
       preview: true,        // 面板实时预览
+      backgroundWatch: true,// 后台保活：最小化时 video 被冻结则自动 play() 唤醒
     },
 
     // 战斗
@@ -3867,6 +3868,10 @@ async function dragScene(ctx, dir) {
       this._fightStart = Date.now(); this._bannerAt = 0; this._holdUntil = 0; this._holdBlack = false;
       this._stillSince = 0;   // 0.5.79：本场「画面开始持续静止」的时间戳（0 = 画面在动）
       this._bannerMuteUntil = 0;
+      // v0.6.36：「第X回」战斗中闸门 —— 每场重新起算（计数/节流/日志各重置）
+      //   _rbSeen：本场是否**已确认进过战斗**（未确认前不计数，避免开场误判）
+      this._rbNextAt = 0; this._rbMissCnt = 0; this._rbLogged = false;
+      this._rbSeen = false; this._rbWaitLogged = false;
       // v0.6.22：开场静默期 —— 点开战后先什么都别按，等过场/登场走完
       if (startDelayMs > 0) {
         Utils.log('info', `    ⏳ 开场静默 ${Math.round(startDelayMs / 1000)}s（等过场/登场走完再开始连招）`);
@@ -3976,6 +3981,62 @@ async function dragScene(ctx, dir) {
               Utils.log('info', `    ✓ 检测到结算图标（战斗详情·卷轴）score=${ae.score}`
                 + ` @(${ae.x},${ae.y}) → 判定本场结束`);
               return 'settlement';
+            }
+            // ★ v0.6.36 诊断（用户口径 2026-09-26「好」）：**未命中时也记一次**，节流 ~5s。
+            //   背景：2026-09-26 实跑，战斗 4 分 19 秒内**一次都没有**结算识别日志 ——
+            //   而该方法失败时原先完全静默，无法判断是「没执行到」还是「执行了但没命中」。
+            //   探针本身已用两张实机截图验证正确（SAD 3.4 / 5.3，阈 30）。
+            //   ⇒ 日志有这行 = 走到检查了（看 score 差多远）；
+            //     完全没有  = 根本没执行到（流程问题）。
+            //   ⚠ 纯诊断，不改任何判定逻辑。
+            if (!this._aeLogAt || nowX - this._aeLogAt >= 5000) {
+              this._aeLogAt = nowX;
+              Utils.log('info', `    · 结算图标未命中 score=${ae.score}（阈 ${ARENA_END_ICON_THRESH}）`
+                + (ae.err ? ` err=${ae.err}` : ''));
+            }
+          }
+
+          // ── v0.6.36：忍术对战「在战斗中」闸门（opts.roundBadge）────────────────
+          //  用户口径（2026-09-28）：「战斗页面中间有『第x回』这样的字样，以这个作为
+          //    **战斗中**的判定 —— **有这个才执行战斗连点器，没有就连点器停下来**，
+          //    这样避免连点器乱按导致误入其他页面。这个探针 1s 间隔都可以」。
+          //
+          //  为什么必须加：2026-09-28 实跑角斗场一局空转 9 分 45 秒 —— 结算图标 score
+          //    全程 39.8~85.9（从没接近阈值 30），09:48:48 起恒定 65.9（画面静止），
+          //    而连点器还在按右侧技能/普攻键 → **点进了 (1046,658) 附近的「调整阵容」入口**。
+          //    根因：连点器只认"结算图标命中"才停手，一旦不在战斗画面就无从得知，只能盲按。
+          //  ⇒ 每 1s 复查一次「第」，不见了就立即松手并把本场判为已离开战斗。
+          //  ⚠ 只在 opts.roundBadge 时启用（目前只有忍术对战），其它玩法行为完全不变。
+          if (opts.roundBadge) {
+            if (!this._rbNextAt || nowX >= this._rbNextAt) {
+              this._rbNextAt = nowX + (opts.roundBadgePollMs || 1000);
+              const rb = await this.sawBattleRound();
+              if (rb.ok) {
+                this._rbSeen = true;      // ★ 首次命中 ⇒ 确认「确实进过战斗」
+                this._rbMissCnt = 0;
+                if (!this._rbLogged) {
+                  this._rbLogged = true;
+                  Utils.log('info', `    ✓ 「第X回」在场（score=${rb.score}）→ 确认在战斗中，连点继续`);
+                }
+              } else if (!this._rbSeen) {
+                // ⚠ 和 pauseGuard 同一处理：**未确认进入战斗前，失败不计数** ——
+                //   否则开场过场/加载残留那几拍（「第」尚未渲染）会被误判成"已离开战斗"，
+                //   连点器还没开始打就被停掉。
+                if (!this._rbWaitLogged) {
+                  this._rbWaitLogged = true;
+                  Utils.log('info', `    · 「第X回」尚未出现（score=${rb.score}）→ 等待入场后再判定`);
+                }
+              } else {
+                this._rbMissCnt = (this._rbMissCnt || 0) + 1;
+                // 连续 2 次（≈2s）都没认到才算离开战斗 —— 单次可能是过场/换小局的瞬断
+                if (this._rbMissCnt >= (opts.roundBadgeMissNeed || 2)) {
+                  this.op && this.op.releaseHold && this.op.releaseHold();
+                  Utils.log('warn', `    ⚠ 「第X回」已消失（连续 ${this._rbMissCnt} 次，` +
+                    `末次 score=${rb.score}）→ **立即停手**，判定已离开战斗（防连点器误点其它页面）`);
+                  this._rbLogged = false;
+                  return 'round-gone';
+                }
+              }
             }
           }
 
@@ -4093,6 +4154,49 @@ async function dragScene(ctx, dir) {
         const tmpl = await loadArenaEndIconTemplate();
         const res = this.vision.findTemplate(tmpl, ARENA_END_ICON_REGION,
           { step: 1, thresh: ARENA_END_ICON_THRESH });
+        return {
+          ok: !!(res && res.ok),
+          score: res && res.score !== undefined ? res.score : null,
+          x: res ? res.x : null,
+          y: res ? res.y : null,
+        };
+      } catch (e) {
+        return { ok: false, score: null, x: null, y: null, err: e.message };
+      }
+    }
+
+    /** 加载「第」字模板（只解析一次，之后缓存）——用于「在战斗中」判定。 */
+    async loadRoundDiTemplate() {
+      if (this._roundDiTmpl) return this._roundDiTmpl;
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('「第」模板解码失败'));
+        i.src = ARENA_ROUND_DI_TMPL;
+      });
+      const cv = document.createElement('canvas');
+      cv.width = img.width; cv.height = img.height;
+      cv.getContext('2d').drawImage(img, 0, 0);
+      this._roundDiTmpl = cv;
+      return cv;
+    }
+
+    /** 标准件⑤：**是否在忍术对战战斗中**（判据 = 顶部中央的「第 X 回」）。
+     *
+     *  用户口径（2026-09-28）：「忍术对战不能使用暂停探针…战斗页面中间有『第x回』
+     *    这样的字样，以这个作为**战斗中**的判定 —— 有这个才执行战斗连点器，
+     *    没有就连点器停下来，避免连点器乱按导致误入其他页面。这个探针 1s 间隔都可以」。
+     *
+     *  只匹配「第」一个字（不含数字/「回」）⇒ 回合数 1/2/3/4/5 变化不影响。
+     *  @returns {Promise<{ok:boolean, score:number|null, x:number|null, y:number|null}>}
+     *    ok=true ⇒ 在战斗中（画面顶部中央能认到「第」）
+     */
+    async sawBattleRound() {
+      this._fresh();   // ⚠ 必须先刷新帧（同 sawArenaRewardPanel 的教训：不刷新会读到旧帧）
+      try {
+        const tmpl = await this.loadRoundDiTemplate();
+        const res = this.vision.findTemplate(tmpl, ARENA_ROUND_REGION,
+          { step: 1, thresh: ARENA_ROUND_THRESH });
         return {
           ok: !!(res && res.ok),
           score: res && res.score !== undefined ? res.score : null,
@@ -5479,6 +5583,25 @@ const SECRET_REALM_SETTLE_PROBE_MS = 2000;
 const ARENA_END_ICON_TMPL = 'data:image/png;base64,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';
 // 搜索区域（在模板四周各留约 12px 余量；findTemplate 的 region 是 [x1,y1,x2,y2]）
 const ARENA_END_ICON_REGION = [1095, 2, 1168, 62];
+
+// ── 忍术对战「在战斗中」探针：画面顶部中央的「第 X 回」回合指示器 ────────────
+//  用户口径（2026-09-28）：「忍术对战不能使用暂停探针…战斗页面中间有『第x回』
+//    这样的字样，以这个作为**战斗中**的判定 —— **有这个才执行战斗连点器，
+//    没有就连点器停下来**，这样避免连点器乱按导致误入其他页面。这个探针 1s 间隔都可以」。
+//
+//  ⚠ 只抠**「第」一个字**（不含数字、不含「回」）—— 用户口径：
+//    「不需要第1回 第2回这些，你只需要匹配第 和 回就行，甚至，只匹配第就行」。
+//    ⇒ 回合数变化（1/2/3/4/5）**不影响**匹配，模板只有 40x49，匹配也快。
+//
+//  来源：2026-09-28 实机截图（第 3 回）1920 空间 x∈[886,946] y∈[25,99]，
+//    缩放到 1280 空间得 40x49。回验：搜索区内最优 SAD=6.4（位置 (591,17) 与实测吻合）。
+//
+//  为什么不用颜色判据：该区域背景是红金色，实测「红色占比」整片都高
+//    （目标 63.1% vs 右侧同高区 74.8% / 上方 98.2%）→ 无判别力，必须用字形模板。
+const ARENA_ROUND_DI_TMPL = 'data:image/png;base64,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';
+// 搜索区（1280 空间）：模板落点在 (591,17)，四周留余量
+const ARENA_ROUND_REGION = [575, 5, 720, 90];
+const ARENA_ROUND_THRESH = 25;   // 与 findTemplate 默认一致；实测 6.4，余量充足
 // 匹配阈值：低于此值即认为「结算画面到了」。SAD，越小越像。
 const ARENA_END_ICON_THRESH = 30;   // 实测：正 0.00 / 负 ≥44.92
 
@@ -7917,12 +8040,28 @@ function loadRealmNameTemplates() {
             // 结算图标模板匹配（右上角「战斗详情」卷轴图标）
             //   实测：正样本 2.5 / 负样本 ≥41.7 → 阈值 30，命中即落判（不再开观察窗）
             arenaEndIcon: true,
+            // ★ v0.6.36：「第X回」战斗中闸门（用户口径 2026-09-28）——
+            //   每 1s 复查一次顶部中央的「第」；连续 2 次认不到 → 立即松手停手、
+            //   本场判为 'round-gone'。防连点器在非战斗画面上乱按误入其它页面
+            //   （实测 2026-09-28：空转 9 分 45 秒后点进「调整阵容」入口）。
+            roundBadge: true,
+            roundBadgePollMs: 1000,
+            roundBadgeMissNeed: 2,
             // 点「开战」后静默 10s 再开始连招（用户 2026-09-22 口径；录制实测空档 22.68s）
             startDelayMs: 10000,
           };
           const t0 = Date.now();
           const reason = await ctx.fight(FIGHT_OPTS);
           Utils.log('info', `⚔️ 角斗场 ${label} 打完（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s · 结束原因 ${reason}）`);
+
+          // ★ v0.6.36：'round-gone' = 「第X回」消失、已离开战斗画面（连点器已停手）。
+          //   ⚠ **不能走下面的「跳过结算」点击** —— 那时画面不是结算页，
+          //      点 (1137,589) 就是盲点，正是之前误入「调整阵容」的元凶。
+          //   直接返回，交给调用方按"本局没能正常打完"处理（不盲点、下一轮自检）。
+          if (reason === 'round-gone') {
+            Utils.log('warn', `    ↺ 本局判定为「已离开战斗画面」（第X回消失）→ 不再点结算位，交给调用方自检`);
+            return reason;
+          }
 
           // ③ 跳过结算：松手 → 等 0.5s → 点普攻位 k(1137,589)
           //   用户口径：「结算识别后 0.5s 点 k 那个位置」。
@@ -8058,6 +8197,18 @@ function loadRealmNameTemplates() {
             if (r === 'no-ready' || r === 'no-start') {
               Utils.log('warn', `    ⚠ 本局没能正常开打（${r}）→ 提前结束本批`);
               break;
+            }
+            // ★ v0.6.36：'round-gone' = 战斗中途「第X回」消失（连点器已停手）。
+            //   此时画面不确定（可能已回准备界面、也可能在别的页）→
+            //   先等下确认是否已在准备界面：在 → 直接续下一局；不在 → 结束本批（不盲点）。
+            if (r === 'round-gone') {
+              const ok = (await ctx.waitArenaReady(8000)).ok;
+              if (ok) {
+                Utils.log('info', '    ↺ 第X回消失但已在战斗准备界面 → 续下一局');
+              } else {
+                Utils.log('warn', '    ⚠ 第X回消失且不在准备界面 → 提前结束本批（不盲点）');
+                break;
+              }
             }
             if (round >= rounds) break;
 
@@ -10306,6 +10457,7 @@ function loadRealmNameTemplates() {
       };
 
       this._watchVision();
+      this._watchBackground();
       this._bindHotkey();
       this._registerMenu();
 
@@ -10333,6 +10485,72 @@ function loadRealmNameTemplates() {
         }
         if (tries > 300) clearInterval(timer);
       }, 2000);
+    }
+
+    /**
+     * 后台保活看门狗。
+     *
+     * 为什么需要：窗口最小化时 Chromium 会冻结标签页，把 <video> 直接置为 paused。
+     * 实测（tools/bg-sampler.js）：最小化后 currentTime 卡死不动、连续多次抽帧 hash 完全相同
+     * —— 画面冻在最后一帧。此时脚本基于 drawImage(video) 的场景判定会**永远返回同一个结果**，
+     * 于是照着过期画面狂点坐标，全程不知道自己已经脱轨（表现为日志里坐标整体错位、
+     * 场景恒为 other、以及长时间静默后突然报「长时间未操作已退出游戏」）。
+     *
+     * 实测（tools/bg-watchdog-test2.js）：最小化状态下主动 play() 即可恢复，
+     * currentTime 持续推进、每帧 hash 都不同、场景识别全程正常。
+     *
+     * 分支处理（按实测经验，不能只判 paused）：
+     *   - readyState === 0  : 播放器正在重置/重连，**不要**插手，等它自己恢复
+     *   - paused 且 rs >= 2 : 被后台冻结 → play()
+     *   - 其它              : 正常播放，不打扰
+     */
+    _watchBackground() {
+      if (this.config.get('vision.backgroundWatch') === false) return;
+
+      const WATCH_MS = 3000;
+      let lastHidden = null;
+      let lastReason = '';
+      let recovering = 0;
+
+      this._bgWatchdog = setInterval(() => {
+        const v = this.vision.video;
+        if (!v || v.tagName !== 'VIDEO') return;
+
+        // 可见性变化时记一笔，便于事后定位「什么时候切的后台」
+        const hidden = !!document.hidden;
+        if (hidden !== lastHidden) {
+          lastHidden = hidden;
+          Utils.log('info', hidden
+            ? '👁 页面进入后台（最小化/切标签）。看门狗已启动，画面暂停会自动唤醒。'
+            : '👁 页面回到前台。');
+        }
+        if (!hidden) return;
+
+        // 后台才需要干预；前台交给播放器自己
+        if (v.readyState === 0) {
+          // 重置中：贸然 play() 可能打断重连流程，只观察
+          if (++recovering % 5 === 0) {
+            Utils.log('warn', `画面元素正在重置（readyState=0，已持续 ${recovering * WATCH_MS / 1000}s），等待自行恢复`);
+          }
+          return;
+        }
+        recovering = 0;
+
+        if (!v.paused) return;
+
+        const p = v.play();
+        const tag = `后台唤醒 play()（readyState=${v.readyState}）`;
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            if (lastReason !== 'ok') { lastReason = 'ok'; Utils.log('info', `✓ ${tag} 成功，画面已恢复`); }
+          }).catch(e => {
+            if (lastReason !== 'fail') {
+              lastReason = 'fail';
+              Utils.log('warn', `⚠ ${tag} 失败：${e && e.name ? e.name : e}。画面可能持续冻结，请在设置里打开 nav.blindBack 兜底。`);
+            }
+          });
+        }
+      }, WATCH_MS);
     }
 
     _bindHotkey() {
