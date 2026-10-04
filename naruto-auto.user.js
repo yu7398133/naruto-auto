@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.40
+// @version      0.6.41
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.40'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.41'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -3868,9 +3868,10 @@ async function dragScene(ctx, dir) {
       this._fightStart = Date.now(); this._bannerAt = 0; this._holdUntil = 0; this._holdBlack = false;
       this._stillSince = 0;   // 0.5.79：本场「画面开始持续静止」的时间戳（0 = 画面在动）
       this._bannerMuteUntil = 0;
-      // v0.6.36：「第X回」战斗中闸门 —— 每场重新起算（计数/节流/日志各重置）
+      // v0.6.36：「第X回」战斗中闸门 —— 每场重新起算（计数/日志各重置）
       //   _rbSeen：本场是否**已确认进过战斗**（未确认前不计数，避免开场误判）
-      this._rbNextAt = 0; this._rbMissCnt = 0; this._rbLogged = false;
+      //   ⚠ v0.6.41 已删除 _rbNextAt：它那层 1s 节流是被误判的直接原因（见闸门处注释）
+      this._rbMissCnt = 0; this._rbLogged = false;
       this._rbSeen = false; this._rbWaitLogged = false;
       // v0.6.22：开场静默期 —— 点开战后先什么都别按，等过场/登场走完
       if (startDelayMs > 0) {
@@ -4008,36 +4009,45 @@ async function dragScene(ctx, dir) {
           //  ⇒ 每 1s 复查一次「第」，不见了就立即松手并把本场判为已离开战斗。
           //  ⚠ 只在 opts.roundBadge 时启用（目前只有忍术对战），其它玩法行为完全不变。
           if (opts.roundBadge) {
-            if (!this._rbNextAt || nowX >= this._rbNextAt) {
-              this._rbNextAt = nowX + (opts.roundBadgePollMs || 1000);
-              const rb = await this.sawBattleRound();
-              if (rb.ok) {
-                this._rbSeen = true;      // ★ 首次命中 ⇒ 确认「确实进过战斗」
-                this._rbMissCnt = 0;
-                if (!this._rbLogged) {
-                  this._rbLogged = true;
-                  Utils.log('info', `    ✓ 「第X回」在场（score=${rb.score}）→ 确认在战斗中，连点继续`);
-                }
-              } else if (!this._rbSeen) {
-                // ⚠ 和 pauseGuard 同一处理：**未确认进入战斗前，失败不计数** ——
-                //   否则开场过场/加载残留那几拍（「第」尚未渲染）会被误判成"已离开战斗"，
-                //   连点器还没开始打就被停掉。
-                if (!this._rbWaitLogged) {
-                  this._rbWaitLogged = true;
-                  Utils.log('info', `    · 「第X回」尚未出现（score=${rb.score}）→ 等待入场后再判定`);
-                }
-              } else {
-                this._rbMissCnt = (this._rbMissCnt || 0) + 1;
-                // ⚠ v0.6.40：2 → 4（≈4s）。原为 2 次（≈2s），2026-10-04 实跑证明
-                //   探针分数抖动时 2 秒就能凑够 2 次 miss → 战斗中途误判「已离开战斗」。
-                //   放宽到 4 次：过场/换小局/抖动都能扛住；真离开也有 4 秒内落判。
-                if (this._rbMissCnt >= (opts.roundBadgeMissNeed || 4)) {
-                  this.op && this.op.releaseHold && this.op.releaseHold();
-                  Utils.log('warn', `    ⚠ 「第X回」已消失（连续 ${this._rbMissCnt} 次，` +
-                    `末次 score=${rb.score}）→ **立即停手**，判定已离开战斗（防连点器误点其它页面）`);
-                  this._rbLogged = false;
-                  return 'round-gone';
-                }
+            // ⚠ v0.6.41 致命修复：**必须每次循环都采样一次**，不能只在 1s 节流命中时采样。
+            //
+            //   2026-10-04 实测（v0.6.40 日志）：
+            //     13:17:53 ✓ 第X回在场(49.4)   ← 唯一一次采样
+            //     13:17:58~13:18:46 · 结算图标每5s一条（闸门这 56s 内**一次都没采样**）
+            //     13:18:49 ⚠ 第X回已消失(连续4次)  ← 凭空攒出 4 次 miss
+            //   整整 56 秒战斗期间，稳定帧（画面最静止）全部被 1s 节流跳过 →
+            //   采样只落在「连点器点击后的模糊帧」上 → 必然认不到「第」→ 攒够 4 次误判离场。
+            //
+            //   注意这与阈值无关：战斗中实测 49.4 已 < 55。调阈治不了「根本没采样」。
+            //   本块位于 waitForEnd 的 300ms 检测拍（if (due)）内，每拍都走到这里；
+            //   原代码在其内又套一层 1s 节流，两周期互质 → 采样点被大幅跳过。
+            const rb = await this.sawBattleRound();
+            if (rb.ok) {
+              this._rbSeen = true;      // ★ 首次命中 ⇒ 确认「确实进过战斗」
+              this._rbMissCnt = 0;
+              if (!this._rbLogged) {
+                this._rbLogged = true;
+                Utils.log('info', `    ✓ 「第X回」在场（score=${rb.score}）→ 确认在战斗中，连点继续`);
+              }
+            } else if (!this._rbSeen) {
+              // ⚠ 和 pauseGuard 同一处理：**未确认进入战斗前，失败不计数** ——
+              //   否则开场过场/加载残留那几拍（「第」尚未渲染）会被误判成"已离开战斗"，
+              //   连点器还没开始打就被停掉。
+              if (!this._rbWaitLogged) {
+                this._rbWaitLogged = true;
+                Utils.log('info', `    · 「第X回」尚未出现（score=${rb.score}）→ 等待入场后再判定`);
+              }
+            } else {
+              this._rbMissCnt = (this._rbMissCnt || 0) + 1;
+              // ⚠ v0.6.40：2 → 4（≈4s）。原为 2 次（≈2s），2026-10-04 实跑证明
+              //   探针分数抖动时 2 秒就能凑够 2 次 miss → 战斗中途误判「已离开战斗」。
+              //   放宽到 4 次：过场/换小局/抖动都能扛住；真离开也有 4 秒内落判。
+              if (this._rbMissCnt >= (opts.roundBadgeMissNeed || 4)) {
+                this.op && this.op.releaseHold && this.op.releaseHold();
+                Utils.log('warn', `    ⚠ 「第X回」已消失（连续 ${this._rbMissCnt} 次，` +
+                  `末次 score=${rb.score}）→ **立即停手**，判定已离开战斗（防连点器误点其它页面）`);
+                this._rbLogged = false;
+                return 'round-gone';
               }
             }
           }
