@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.42
+// @version      0.6.43
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.42'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.43'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -3874,6 +3874,30 @@ async function dragScene(ctx, dir) {
       //   _rbRecoverCount：v0.6.42 本场「误判离场后恢复连点」的次数（诊断用）
       this._rbMissCnt = 0; this._rbLogged = false; this._rbRecoverCount = 0;
       this._rbSeen = false; this._rbWaitLogged = false;
+
+      // ══ v0.6.43：独立高频结算探针 ══════════════════════════════════════════
+      //  根因（2026-10-06 实测，用户口径「加快识别结算画面的频率才能根治」）：
+      //    主循环 L4194 `const comboGap = await this.combatStep()` 一拍要发 ~15 次
+      //    点击（每次 clickNatural 自带延迟），**await 完才轮到下一轮 due 检测**。
+      //    实测：战斗 167s / 点击 812 次 ≈ 4.9 次/秒，而结算图标探针落点
+      //    5s / 5s / 6s / 5s …（被 combatStep 拖慢）。
+      //    而结算横幅实测只停留 0.3~1s（见下方 vsConfirm 注释里的 1020 帧 trace）
+      //    ⇒ 5s 看一眼去抓 1s 的画面，命中率 < 20%，必然漏判。
+      //
+      //  修法：把 detectArenaEnd 从被连点器独占的主循环里**拆出来**，
+      //    用独立 setInterval 以 150ms 跑（≈6.7 次/秒，比原来快 30 倍），
+      //    命中即置 _arenaEndHit，主循环下一拍读标志位立刻收手。
+      //    探针不 await 连点器 ⇒ 采样节奏不再被点击耗时绑架。
+      //
+      //  ⚠ 只在 opts.arenaEndIcon 时启用（目前只有忍术对战），其它玩法完全不变。
+      //  ⚠ 用 _arenaProbeBusy 防重入：上一轮 SAD 还没跑完就跳过这一拍，
+      //     避免慢帧时任务堆积。
+      //  ⚠ 定时器的**创建与销毁都在下面 try/finally 内**：preMs 预热阶段
+      //     (combatFor) 长达 13s，若期间 Runtime.check() 抛出中断，
+      //     定时器就会漏在场上。放到 try 内由 finally 统一兜底。
+      this._arenaEndHit = null;
+      this._arenaProbeBusy = false;
+      this._arenaProbeTimer = null;
       // v0.6.22：开场静默期 —— 点开战后先什么都别按，等过场/登场走完
       if (startDelayMs > 0) {
         Utils.log('info', `    ⏳ 开场静默 ${Math.round(startDelayMs / 1000)}s（等过场/登场走完再开始连招）`);
@@ -3898,8 +3922,44 @@ async function dragScene(ctx, dir) {
       const region = [260, 90, 1020, 560];
       this.vision.snapshot(region);
 
+      // ══ v0.6.43：所有退出路径都必须关掉高频探针定时器 ═══════════════════════
+      //  waitForEnd 有 7 个 return（settlement ×5 / round-gone / timeout），
+      //  逐个加清理极易漏 ⇒ 统一用 try/finally 兜住，否则定时器会泄漏到下一局
+      //  （表现：多局叠加后 CPU 飙升、旧探针在新局的画面上乱报）。
+      try {
+      // 高频结算探针：放在正式轮询期起点，独立于 combatStep 占用（见上方长注释）
+      if (opts.arenaEndIcon) {
+        const probeMs = opts.arenaProbeMs != null ? opts.arenaProbeMs : 150;
+        this._arenaProbeTimer = setInterval(async () => {
+          if (this._arenaProbeBusy || this._arenaEndHit) return;
+          // 已判定结算/离开战斗后不再采样（主循环可能尚未退出）
+          if (this._settleConfirmed) return;
+          this._arenaProbeBusy = true;
+          try {
+            const r = await this.detectArenaEnd();
+            if (r && r.ok) {
+              this._arenaEndHit = { score: r.score, x: r.x, y: r.y, at: Date.now() };
+            }
+          } catch (e) { /* 探针异常不阻断主流程 */ }
+          finally { this._arenaProbeBusy = false; }
+        }, probeMs);
+      }
+
       while (Date.now() - start < maxWait) {
         Runtime.check();
+
+        // ══ v0.6.43：优先读独立高频探针的结果 ══════════════════════════════
+        //  该探针以 150ms 独立运行（不受 combatStep 独占影响），命中即置标志。
+        //  放在最前面：它比主循环里那次 300ms（实际被拖到 ~5s）的检测快得多，
+        //  是「结算画面只活 0.3~1s」场景下唯一能可靠抓住的时机。
+        if (this._arenaEndHit) {
+          const h = this._arenaEndHit;
+          this._arenaEndHit = null;
+          this.op && this.op.releaseHold && this.op.releaseHold();
+          Utils.log('info', `    ✓ 独立探针命中结算图标 score=${h.score}`
+            + ` @(${h.x},${h.y}) → 判定本场结束（150ms 高频采样）`);
+          return 'settlement';
+        }
 
         // v0.5.94：外部模板探针已确认结算（秘境左下角返回）→ 立刻收手，不再浪费一拍。
         //   这一拍的延迟对「连点器点进下一轮」很关键（用户口径：结算验证一定要及时）。
@@ -4193,6 +4253,15 @@ async function dragScene(ctx, dir) {
           && this._lastScene !== SCENE.HOME;
         const comboGap = (this.config.get('battle.keyAssist') && stillFighting) ? (await this.combatStep()) : 0;
         await Utils.sleep(comboGap || (due ? 150 : 200));
+      }
+      } finally {
+        // v0.6.43：无论如何都要停掉高频结算探针（见上方 try 处说明）
+        if (this._arenaProbeTimer) {
+          clearInterval(this._arenaProbeTimer);
+          this._arenaProbeTimer = null;
+        }
+        this._arenaEndHit = null;
+        this._arenaProbeBusy = false;
       }
 
       Utils.log('warn', '    ⚠ 等待战斗超时，继续走结算清理');
