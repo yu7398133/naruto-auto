@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.41
+// @version      0.6.42
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.41'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.42'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -3871,7 +3871,8 @@ async function dragScene(ctx, dir) {
       // v0.6.36：「第X回」战斗中闸门 —— 每场重新起算（计数/日志各重置）
       //   _rbSeen：本场是否**已确认进过战斗**（未确认前不计数，避免开场误判）
       //   ⚠ v0.6.41 已删除 _rbNextAt：它那层 1s 节流是被误判的直接原因（见闸门处注释）
-      this._rbMissCnt = 0; this._rbLogged = false;
+      //   _rbRecoverCount：v0.6.42 本场「误判离场后恢复连点」的次数（诊断用）
+      this._rbMissCnt = 0; this._rbLogged = false; this._rbRecoverCount = 0;
       this._rbSeen = false; this._rbWaitLogged = false;
       // v0.6.22：开场静默期 —— 点开战后先什么都别按，等过场/登场走完
       if (startDelayMs > 0) {
@@ -4043,11 +4044,87 @@ async function dragScene(ctx, dir) {
               //   探针分数抖动时 2 秒就能凑够 2 次 miss → 战斗中途误判「已离开战斗」。
               //   放宽到 4 次：过场/换小局/抖动都能扛住；真离开也有 4 秒内落判。
               if (this._rbMissCnt >= (opts.roundBadgeMissNeed || 4)) {
+                // ══ v0.6.42：误判恢复机制（用户口径 2026-10-06）══════════════════
+                //  用户原话：「这个不应该成为结算的探针啊，结算本来就是以另外的为准的，
+                //    这个只是作为停止战斗的依据，避免连点器误点。如果这个探针停止战斗后
+                //    迟迟没有获取到结算探针，那就意味着错误，战斗连点器应该恢复才对」。
+                //
+                //  旧行为（v0.6.36~41）：直接 releaseHold() + return 'round-gone'，
+                //    把本局判为「已结束」→ 调用方以为打完了 → 空转/误点/提前结束本批。
+                //    而「第X回」读数本身在战斗中就会漂到 68（实测），必然误报。
+                //
+                //  新行为：**停手 ≠ 结束**。停手后进入观察窗，两条恢复判据任一满足就
+                //    重新按住连点器继续打：
+                //      ① 结算图标命中      ⇒ 确实打完了，正常落判 'settlement'
+                //      ② 「第X回」重新出现 ⇒ 刚才那次是误判，恢复连点
+                //    观察窗耗尽且两条都不满足 ⇒ 真的不确定，才返回 'round-gone' 交给调用方。
                 this.op && this.op.releaseHold && this.op.releaseHold();
-                Utils.log('warn', `    ⚠ 「第X回」已消失（连续 ${this._rbMissCnt} 次，` +
-                  `末次 score=${rb.score}）→ **立即停手**，判定已离开战斗（防连点器误点其它页面）`);
-                this._rbLogged = false;
-                return 'round-gone';
+                Utils.log('warn', `    ⚠ 「第X回」连续 ${this._rbMissCnt} 次未命中（末次 score=${rb.score}）`
+                  + `→ **暂停连点器**，进入观察窗（防误点其它页面）`);
+
+                const recMs = opts.roundBadgeRecoverMs != null ? opts.roundBadgeRecoverMs : 8000;
+                const recStep = 400;
+                const recEnd = Date.now() + recMs;
+                let recovered = false;
+                let sawEnd = false;
+                let stillMiss = 0;
+
+                while (Date.now() < recEnd) {
+                  await Utils.sleep(recStep);
+                  Runtime.check();
+
+                  // 判据①：结算图标命中 ⇒ 真结束了
+                  if (opts.arenaEndIcon) {
+                    const ae2 = await this.detectArenaEnd();
+                    if (ae2.ok) {
+                      sawEnd = true;
+                      Utils.log('info', `    ✓ 观察窗内命中结算图标 score=${ae2.score} → 确认本场结束`);
+                      break;
+                    }
+                  }
+
+                  // 判据②：「第X回」重新出现 ⇒ 误判，恢复连点
+                  const rb2 = await this.sawBattleRound();
+                  if (rb2.ok) {
+                    recovered = true;
+                    Utils.log('info', `    ↺ 观察窗内「第X回」重新出现（score=${rb2.score}）`
+                      + ` → 判定为误报，**恢复连点器继续战斗**`);
+                    break;
+                  }
+                  stillMiss++;
+                }
+
+                if (sawEnd) {
+                  this._rbMissCnt = 0;
+                  this._rbLogged = false;
+                  this._rbSeen = false;
+                  return 'settlement';
+                }
+
+                if (recovered) {
+                  // 恢复：清零计数，重新按住普攻，继续正常循环
+                  this._rbMissCnt = 0;
+                  this._rbSeen = true;
+                  this._rbLogged = false;   // 允许下次再打一次「在场」日志
+                  this._rbRecoverCount = (this._rbRecoverCount || 0) + 1;
+                  // 恢复普攻按住态（等价于 combatStep 里的 _reassertHold，
+                  //   但这里在 waitForEnd 作用域，拿不到那里的 holdAtk/P 局部量，
+                  //   故直接读配置与 BattleFlow.PLACES）
+                  try {
+                    if (this.config.get('battle.holdAttack') !== false) {
+                      this.op.pressHold(BattleFlow.PLACES.k[0], BattleFlow.PLACES.k[1]);
+                    }
+                  } catch (e) { /* 按住失败不阻断轮询 */ }
+                  Utils.log('info', `    ▶ 已恢复连点器（本场第 ${this._rbRecoverCount} 次恢复）`
+                    + ` → 继续战斗`);
+                  // ⚠ 不 return，继续走 waitForEnd 主循环（连点器已重新按住）
+                } else {
+                  // 观察窗耗尽：两条判据都没满足 ⇒ 真的不确定，交回调用方
+                  Utils.log('warn', `    ⚠ 观察窗 ${Math.round(recMs / 1000)}s 内既无结算图标、`
+                    + `也无「第X回」（连续 ${stillMiss} 次未命中）→ 判定已离开战斗`);
+                  this._rbLogged = false;
+                  return 'round-gone';
+                }
               }
             }
           }
@@ -5613,12 +5690,13 @@ const ARENA_END_ICON_REGION = [1095, 2, 1168, 62];
 const ARENA_ROUND_DI_TMPL = 'data:image/png;base64,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';
 // 搜索区（1280 空间）：模板落点在 (591,17)，四周留余量
 const ARENA_ROUND_REGION = [575, 5, 720, 90];
-const ARENA_ROUND_THRESH = 55;   // ⚠ v0.6.40：25 → 55。原注释「实测 6.4」只在单张干净样本上成立，
-                                 //   2026-10-04 实跑证明**战斗中同一画面**的分数在 20.4~46.8 间抖动，
-                                 //   正好跨在 25 两侧 → 抖动被误读成「第X回消失」→ 战斗中途停手。
-                                 //   放到 55：真在场（≤47）一律算在场；真离开战斗由结算图标
-                                 //   （0.00 vs ≥44.92，分离干净）兜底，不依赖本闸门。
-                                 //   本闸门只是「防连点器乱按」的软闸，宁迟钝勿过敏。
+const ARENA_ROUND_THRESH = 90;   // ⚠ v0.6.42：55 → 90（用户口径 2026-10-06）。
+                                 //   本探针**只负责「暂停连点器防误点」，不负责判定战斗结束**
+                                 //   —— 结算的唯一判据是 ARENA_END_ICON（0.00 vs ≥44.92，分离干净）。
+                                 //   实测同一战斗画面读数 33.7~68.2 剧烈漂移，55 仍会误报「消失」→
+                                 //   连点器被停、但战斗还在 → 直接空转。
+                                 //   放宽到 90：几乎不会误报消失。误停的代价（整局空转）
+                                 //   远大于漏停的代价（真的离开了也只是多按几下，由结算图标兜底收手）。
 // 匹配阈值：低于此值即认为「结算画面到了」。SAD，越小越像。
 const ARENA_END_ICON_THRESH = 30;   // 实测：正 0.00 / 负 ≥44.92
 
