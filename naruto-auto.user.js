@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.43
+// @version      0.6.44
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.43'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.44'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -5969,8 +5969,12 @@ function loadRealmNameTemplates() {
     /** 0.5.81：每轮领取/补接结束后**回主界面**等待的分钟数，到点再重新拖屏进面板。
      *  用户口径（2026-09-20）：「集会所任务完成后就回到桌面，然后间隔 5min，再重新执行集会所任务，
      *  这样就能在主界面和集会所界面之间来回切换」—— 靠两个界面来回切换保持活跃，
-     *  替代旧的面板内保活（用户实测「左右滑动还是被判无操作超时」）。 */
-    pollMin: 5,
+     *  替代旧的面板内保活（用户实测「左右滑动还是被判无操作超时」）。
+     *  v0.6.44：5 → 2 分钟。实测 9/28、9/30 两次断流都发生在这段静默期里：
+     *    长空闲易被云游戏判「无操作」而回收会话（readyState=0）。缩短空闲窗口
+     *    可降低被判空闲的概率（用户口径：主界面↔集会所来回切换本身就是保活手段，
+     *    切得勤一点更稳）。 */
+    pollMin: 2,
     acceptBtn: [936, 580],       // 接取 → 推荐小队
     launchBtn: [1172, 627],      // 接取 → 出发
     // —— 主界面入口路径（0.5.80 按 2026-09-11 真机录制「任务集会所1」标定）——
@@ -6426,12 +6430,29 @@ function loadRealmNameTemplates() {
     },
 
     /** 分片可中断睡眠（长挂机时用户点停止能立刻响应） */
+    /** 可中断等待。
+     *  v0.6.44：**加入画面流活性检查**。
+     *    旧版只做 `Runtime.check()`（看用户有没有点停止），完全不看 <video>。
+     *    于是「集会所每轮回主界面睡 5 分钟」这段静默期里，云游戏把会话回收、
+     *    画面流断掉（readyState=0）时，脚本毫无察觉，继续睡 —— 这正是 9/28
+     *    (3885s) 与 9/30 (2385s) 两次「白等 1.7 小时」的成因。
+     *    现在：一旦发现流断了，**立刻结束等待**并返回，交给看门狗去重拉流，
+     *    免得在一段已经死掉的画面上继续空耗。
+     *  @returns {Promise<boolean>} true=正常等完；false=因画面流中断提前退出 */
     async sleepInterruptible(ms) {
       const t0 = Date.now();
       while (Date.now() - t0 < ms) {
         await Runtime.check();
+        // 前台/后台都查：断流不挑前后台（旧版只在后台查，正好漏掉前台静默期）
+        // ⚠ 路径：实例方法在 `.app` 上，不是 __narutoAuto 顶层
+        const app = (typeof window !== 'undefined' && window.__narutoAuto && window.__narutoAuto.app) || null;
+        if (app && typeof app.isStreamAlive === 'function' && !app.isStreamAlive()) {
+          Utils.log('warn', '⚠ 等待期间检测到画面流已中断（readyState<2）→ 立刻结束本次等待，转交看门狗恢复');
+          return false;
+        }
         await Utils.sleep(Math.min(5000, ms - (Date.now() - t0)));
       }
+      return true;
     },
 
     /** 打开集会所面板：回主界面 → 两段拖动 → 点入口；
@@ -10469,6 +10490,9 @@ function loadRealmNameTemplates() {
       window.__narutoAuto = {
         app: this,
         runtime: Runtime,   // 0.5.61：接管调试需手动 reset()（上次 stop 后 aborted 不自动复位，pressHold 会抛「已中止」被静默吞掉）
+        // v0.6.44：画面流活性（调试用：__narutoAuto.streamAlive()）
+        streamAlive: () => this.isStreamAlive(),
+        reviveStream: () => { const v = this.vision && this.vision.video; if (v) this._tryReviveStream(v); return true; },
         config: this.config,
         sdk: this.sdk,
         operator: this.op,
@@ -10664,17 +10688,83 @@ function loadRealmNameTemplates() {
      * currentTime 持续推进、每帧 hash 都不同、场景识别全程正常。
      *
      * 分支处理（按实测经验，不能只判 paused）：
-     *   - readyState === 0  : 播放器正在重置/重连，**不要**插手，等它自己恢复
+     *   - readyState === 0  : 见下方 v0.6.44 更正
      *   - paused 且 rs >= 2 : 被后台冻结 → play()
      *   - 其它              : 正常播放，不打扰
+     *
+     * ══ v0.6.44 更正：「readyState===0 不要插手，等它自己恢复」是错的 ══════════
+     *  旧注释假设 rs=0 只是「播放器正在重置/重连」，几十秒就会自愈。实测**从不自愈**：
+     *    9/28  15:15:19~23:10:01  rs=0 死等 3885 秒
+     *    9/30  09:07~10:30:03     rs=0 死等 2385 秒
+     *  两次都断在「集会所每轮回主界面睡 5 分钟」的静默窗口里（用户口径：云游戏在线
+     *  时间过长判定无操作 → 会话被回收 → 登录失效退出）。合计白等约 1.7 小时。
+     *  决定性旁证（9/30）：10:29:21 用户手动切回前台后，rs=0 的刷屏**立刻停止**
+     *  ⇒ 流本身可以恢复，缺的是「有人去碰它」——代码从没主动救过。
+     *  另：rs=0 时 paused 恒为 true，所以「会话被回收」这一情形本来就不表现为
+     *  「paused 且 rs>=2」，旧分支永远接不住它。
+     *
+     *  新策略（不再无限等待）：
+     *    rs=0 持续 < STALL_GRACE_MS  → 只观察（给播放器自己的重连一点时间）
+     *    超过 STALL_GRACE_MS         → 判为流中断：告警 + 主动重拉流，逐级加压
+     *    连续失败超过 STALL_GIVEUP_N → 停止任务并明确报错（不假装在跑）
      */
+    /** v0.6.44：主动重拉流。
+     *  rs=0 表示媒体源已脱离（会话被回收/连接断了），此时 play() 无效 —— 必须先
+     *  重新触发 load() 让 <video> 去重新协商媒体源，再 play()。逐级加压：
+     *    第 1~2 次：play()          —— 最轻，先试最便宜的
+     *    第 3 次起 ：load() + play() —— 重拉流
+     *    第 5 次起 ：再把 src 重新赋值一次（有的播放器要重新 set src 才会重连）
+     *  全程只碰 <video>，**不产生任何鼠标/键盘事件**，不会改变镜头位置
+     *  （用户口径：静默期不操作就是为了不改镜头；这里只做检测与恢复）。 */
+    _tryReviveStream(v) {
+      const n = (this._reviveN = (this._reviveN || 0) + 1);
+      try {
+        if (n >= 5 && v.src) {
+          const s = v.src; v.src = ''; v.src = s;
+          Utils.log('warn', '    ↻ 已重置 <video> src（强制重新协商媒体源）');
+        } else if (n >= 3 && typeof v.load === 'function') {
+          v.load();
+          Utils.log('warn', '    ↻ 已调用 video.load()（重新拉流）');
+        }
+        const p = v.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => Utils.log('info', '    ✓ play() 已接受，等待画面回来…'))
+           .catch(e => Utils.log('warn', `    ⚠ play() 被拒：${(e && e.name) || e}`));
+        }
+      } catch (e) {
+        Utils.log('warn', `    ⚠ 重拉流异常：${(e && e.message) || e}`);
+      }
+    }
+
+    /** v0.6.44：画面流是否存活。
+     *  供等待/静默期轮询用 —— 旧版的所有「等待」都不看 video，于是断流后能白等
+     *  3885 秒。返回 false 时调用方应尽快中断等待、交给看门狗恢复。
+     *  ⚠ 只做判断，不改状态。 */
+    isStreamAlive() {
+      try {
+        const v = this.vision && this.vision.video;
+        if (!v || v.tagName !== 'VIDEO') return true;   // 拿不到元素时不误报
+        return v.readyState >= 2;
+      } catch (e) { return true; }
+    }
+
     _watchBackground() {
       if (this.config.get('vision.backgroundWatch') === false) return;
 
       const WATCH_MS = 3000;
+      /** 宽限期：rs=0 超过这么久就认定不是「短暂重连」而是流断了 */
+      const STALL_GRACE_MS = 60000;
+      /** 告警节流：避免像旧版一样每 15s 刷屏几千行 */
+      const STALL_LOG_EVERY = 30000;
+      /** 重拉流尝试失败多少次后放弃（并报错退出） */
+      const STALL_GIVEUP_N = 6;
       let lastHidden = null;
       let lastReason = '';
       let recovering = 0;
+      let stallSince = 0;        // rs=0 起始时刻（0=当前没卡）
+      let lastStallLog = 0;
+      let reviveTries = 0;
+      let gaveUp = false;
 
       this._bgWatchdog = setInterval(() => {
         const v = this.vision.video;
@@ -10688,18 +10778,55 @@ function loadRealmNameTemplates() {
             ? '👁 页面进入后台（最小化/切标签）。看门狗已启动，画面暂停会自动唤醒。'
             : '👁 页面回到前台。');
         }
-        if (!hidden) return;
 
-        // 后台才需要干预；前台交给播放器自己
+        // ══ v0.6.44：流中断检测**不分前后台** ═══════════════════════════════
+        //  旧版 `if (!hidden) return;` 把整段逻辑限制在后台，于是 9/28、9/30 那两次
+        //  「前台静默期断流」根本不会被观察到。检测必须前台也跑。
+        const now = Date.now();
         if (v.readyState === 0) {
-          // 重置中：贸然 play() 可能打断重连流程，只观察
-          if (++recovering % 5 === 0) {
-            Utils.log('warn', `画面元素正在重置（readyState=0，已持续 ${recovering * WATCH_MS / 1000}s），等待自行恢复`);
+          if (!stallSince) stallSince = now;
+          const stalledMs = now - stallSince;
+
+          // ① 宽限期内：只记一笔，不插手（给播放器自己的重连机会）
+          if (stalledMs < STALL_GRACE_MS) {
+            if (++recovering % 5 === 0) {
+              Utils.log('warn', `画面元素正在重置（readyState=0，已持续 ${Math.round(stalledMs / 1000)}s），宽限 ${STALL_GRACE_MS / 1000}s 后再介入`);
+            }
+            return;
+          }
+
+          // ② 超过宽限期：流大概率真的断了（会话/认证失效），必须主动救
+          if (now - lastStallLog >= STALL_LOG_EVERY) {
+            lastStallLog = now;
+            Utils.log('warn', `⚠ 画面流已中断 ${Math.round(stalledMs / 1000)}s（readyState=0）`
+              + `——大概率是云游戏判定长时间无操作、会话被回收。正在尝试重新拉流（第 ${reviveTries + 1} 次）…`);
+          }
+          this._tryReviveStream(v);
+
+          if (++reviveTries >= STALL_GIVEUP_N && !gaveUp) {
+            gaveUp = true;
+            Utils.log('error', `⛔ 连续 ${STALL_GIVEUP_N} 次重拉流仍失败（已中断 ${Math.round(stalledMs / 1000)}s）。`
+              + `判定云游戏会话已失效，**停止任务**，请在页面上手动处理后续（可能需点「继续体验」续时或重新登录）。`);
+            try { this.stop && this.stop('画面流中断且无法恢复：疑似云游戏会话/登录失效'); } catch (e) { /* ignore */ }
           }
           return;
         }
+
+        // rs 恢复正常 → 结算这一段中断
+        if (stallSince) {
+          const lasted = Math.round((now - stallSince) / 1000);
+          Utils.log('info', `✓ 画面流已恢复（中断 ${lasted}s，重拉流 ${reviveTries} 次）`);
+          if (this._streamStalled) {
+            this._streamStalled = false;
+            Utils.log('info', '↩ 中断已解除，任务可继续。');
+          }
+          stallSince = 0; lastStallLog = 0; reviveTries = 0; gaveUp = false;
+          this._reviveN = 0;
+        }
         recovering = 0;
 
+        // 后台且已暂停（rs>=2）→ 冻结，play() 唤醒
+        if (!hidden) return;
         if (!v.paused) return;
 
         const p = v.play();
