@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.44
+// @version      0.6.45
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.44'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.45'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1185,6 +1185,75 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
       }
       if (best && bestArea > 0) { this.video = best; return best; }
       return null;
+    }
+
+    /** v0.6.45：读取云游戏平台的通用消息弹窗（`.message-wrap`）。
+     *  ── 为什么要做 DOM 识别 ──────────────────────────────────────────────
+     *  脚本此前**只做像素识别，从不读 DOM**，于是弹窗盖屏时它完全无感：
+     *  10/7 日志 20:46:51~21:01:01 连续 47 批 `no-ready`，131 次点击「没反应」
+     *  （diff 0.0018≈画面冻结），只有右上角关闭位有反应。云游戏侧看到的是
+     *  「32 分钟无有效操作」→ 弹「长时间未操作，已退出游戏」→ `video` 销毁。
+     *  DOM 识别比像素识别可靠一个数量级：弹窗一出现就能立刻发现。
+     *
+     *  ── 组件结构（2026-10-07 实测自 live 页面）──────────────────────────
+     *    div.message-wrap                 z-index 99999, position fixed, 全屏 1914×664
+     *      div.back                       遮罩（z:-1）
+     *      div.message-container          弹窗主体 362×177
+     *        div.close-btn                右上角 ×（24×24）
+     *        div.title                    「提示」
+     *        div.message-list > .list-item  正文
+     *        div.footer-container
+     *          div.footer-btn             "取消"
+     *          div.footer-btn.primary     "关闭窗口"   ← primary = 主按钮
+     *
+     *  ⚠ 这是平台**通用**弹窗组件，续期/时长不足等提示应是同一套结构：
+     *    一律走 `.message-wrap`，靠 title/message 文本区分语义，靠 footer-btn 取按钮。
+     *    实测的这一个（已退出游戏）是**终局通知**，点掉也回不到战斗；
+     *    真正需要自动点的是「续期」那一个 —— 本函数负责把任意弹窗读成结构化数据，
+     *    至于怎么处置由调用方按文案决定。
+     *
+     *  @returns {null | {kind:string, title:string, text:string,
+     *                    buttons:{text:string,primary:boolean,x:number,y:number}[],
+     *                    rect:{x:number,y:number,w:number,h:number}}}
+     *           无弹窗或不可见时返回 null。只读，不点击、不改页面。 */
+    readPopup() {
+      try {
+        const roots = [document];
+        document.querySelectorAll('iframe').forEach(f => {
+          try { if (f.contentDocument) roots.push(f.contentDocument); } catch (e) { /* 跨域 */ }
+        });
+        for (const root of roots) {
+          const w = root.querySelector('.message-wrap');
+          if (!w) continue;
+          const cs = getComputedStyle(w);
+          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+
+          const r = w.getBoundingClientRect();
+          const title = (w.querySelector('.title')?.textContent || '').trim();
+          const text = (w.querySelector('.message-list')?.textContent || '').replace(/\s+/g, ' ').trim();
+          const buttons = [...w.querySelectorAll('.footer-btn')].map(b => {
+            const br = b.getBoundingClientRect();
+            return {
+              text: (b.textContent || '').trim(),
+              primary: b.classList.contains('primary'),
+              x: Math.round(br.x + br.width / 2),
+              y: Math.round(br.y + br.height / 2),
+            };
+          });
+          const closeX = w.querySelector('.close-btn');
+
+          // 语义分类：供调用方按场景决定处置方式
+          let kind = 'generic';
+          if (/长时间未操作|已退出游戏/.test(text + title)) kind = 'idle-kick';
+          else if (/时长不足|体验时长|剩余时长|续时|继续体验|开通会员/.test(text + title)) kind = 'renew';
+
+          return { kind, title, text, buttons,
+                   closeBtn: closeX ? (() => { const c = closeX.getBoundingClientRect();
+                     return { x: Math.round(c.x + c.width / 2), y: Math.round(c.y + c.height / 2) }; })() : null,
+                   rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+        }
+        return null;
+      } catch (e) { return null; }
     }
 
     available() {
@@ -6438,18 +6507,59 @@ function loadRealmNameTemplates() {
      *    (3885s) 与 9/30 (2385s) 两次「白等 1.7 小时」的成因。
      *    现在：一旦发现流断了，**立刻结束等待**并返回，交给看门狗去重拉流，
      *    免得在一段已经死掉的画面上继续空耗。
+     *
+     *  v0.6.45：**加入轻量保活**（用户批准）。
+     *    10/7 日志暴露了真正的病因：脚本在一段静默期后连续 47 批 `no-ready`、
+     *    131 次点击「没反应」（diff≈0.0018 画面冻结），随后平台弹出
+     *    「长时间未操作，已退出游戏」并销毁 `<video>`。也就是说 ——
+     *    **平台是按「有没有有效操作」判超时的，长时间不产生输入就会被踢。**
+     *    对策：静默期里周期性发一个**纯鼠标移动**（`_move`，只发 move、
+     *    **不按下不抬起**）——它不可能误点到任何东西，但足以让平台侧的
+     *    空闲计时器复位。
+     *    ⚠ 刻意不用 click：静默期一点击就可能改变界面/镜头位置，而这正是
+     *      沿用至今的约束（「静默期不操作就是为了不改镜头」）。move 只挪光标。
+     *    ⚠ 也不走 `op.click()`：那会画标记、走 SDK 就绪检查，对保活来说太重。
+     *
      *  @returns {Promise<boolean>} true=正常等完；false=因画面流中断提前退出 */
     async sleepInterruptible(ms) {
       const t0 = Date.now();
+      const KEEPALIVE_EVERY = 45000;   // 保活间隔：远小于平台的空闲超时阈值
+      let lastKeepAlive = Date.now();
+      let keepAliveN = 0;
       while (Date.now() - t0 < ms) {
         await Runtime.check();
-        // 前台/后台都查：断流不挑前后台（旧版只在后台查，正好漏掉前台静默期）
+
+        // ① 弹窗检查（v0.6.45）：静默期正是平台最可能弹「已退出」的时候
+        const app0 = (typeof window !== 'undefined' && window.__narutoAuto && window.__narutoAuto.app) || null;
+        if (app0 && app0.vision && typeof app0.vision.readPopup === 'function') {
+          const pu = app0.vision.readPopup();
+          if (pu) {
+            const btns = pu.buttons.map(b => `「${b.text}」`).join(' ');
+            Utils.log('error', `🪟 等待期间检测到平台弹窗 [${pu.kind}] ${pu.title}：${pu.text}　按钮: ${btns}`);
+            return false;    // 交给上层处理；弹窗在时继续等没有意义
+          }
+        }
+
+        // ② 画面流活性：前台/后台都查（旧版只在后台查，正好漏掉前台静默期）
         // ⚠ 路径：实例方法在 `.app` 上，不是 __narutoAuto 顶层
-        const app = (typeof window !== 'undefined' && window.__narutoAuto && window.__narutoAuto.app) || null;
-        if (app && typeof app.isStreamAlive === 'function' && !app.isStreamAlive()) {
+        if (app0 && typeof app0.isStreamAlive === 'function' && !app0.isStreamAlive()) {
           Utils.log('warn', '⚠ 等待期间检测到画面流已中断（readyState<2）→ 立刻结束本次等待，转交看门狗恢复');
           return false;
         }
+
+        // ③ 轻量保活：只发 move，不产生点击
+        if (Date.now() - lastKeepAlive >= KEEPALIVE_EVERY) {
+          lastKeepAlive = Date.now();
+          keepAliveN++;
+          try {
+            if (app0 && app0.sdk && app0.sdk.ready && typeof app0.sdk._move === 'function') {
+              // 在画面中央小范围游走 ±20px：足以复位空闲计时器，又几乎不可能触发悬停交互
+              app0.sdk._move(640 + Utils.random(-20, 20), 360 + Utils.random(-20, 20));
+              Utils.log('debug', `  💤 静默期保活 #${keepAliveN}（纯鼠标移动，无点击）`);
+            }
+          } catch (e) { /* 保活失败不影响等待 */ }
+        }
+
         await Utils.sleep(Math.min(5000, ms - (Date.now() - t0)));
       }
       return true;
@@ -10493,6 +10603,8 @@ function loadRealmNameTemplates() {
         // v0.6.44：画面流活性（调试用：__narutoAuto.streamAlive()）
         streamAlive: () => this.isStreamAlive(),
         reviveStream: () => { const v = this.vision && this.vision.video; if (v) this._tryReviveStream(v); return true; },
+        // v0.6.45：读平台弹窗（调试用：__narutoAuto.popup()）
+        popup: () => this.vision.readPopup(),
         config: this.config,
         sdk: this.sdk,
         operator: this.op,
@@ -10765,8 +10877,31 @@ function loadRealmNameTemplates() {
       let lastStallLog = 0;
       let reviveTries = 0;
       let gaveUp = false;
+      let lastPopupKind = '';    // v0.6.45：弹窗去重，只在内容变化时打日志
 
       this._bgWatchdog = setInterval(() => {
+        // ══ v0.6.45：先查平台弹窗 —— 必须在 `<video>` 检查**之前** ══════════
+        //  弹窗弹出时平台会销毁 `<video>`（实测 videoCount 0→1，弹窗在时 video 缺失）。
+        //  旧版第一行就是 `if (!v) return;`，于是弹窗期间看门狗**整个空转**，
+        //  什么都不会发现。这里前置检测，且不依赖 video 是否存在。
+        const popup = this.vision.readPopup();
+        if (popup) {
+          const sig = popup.kind + '|' + popup.text;
+          if (sig !== lastPopupKind) {
+            lastPopupKind = sig;
+            const btns = popup.buttons.map(b => `「${b.text}」@(${b.x},${b.y})${b.primary ? '[primary]' : ''}`).join(' ');
+            Utils.log('error', `🪟 检测到平台弹窗 [${popup.kind}] ${popup.title}：${popup.text}　按钮: ${btns}`);
+            if (popup.kind === 'idle-kick') {
+              Utils.log('error', '⛔ 云游戏已判定「长时间未操作，已退出游戏」——会话已结束（<video> 已销毁），'
+                + '点掉弹窗也回不到战斗。**停止任务**，请重新进入游戏。');
+            } else if (popup.kind === 'renew') {
+              Utils.log('warn', '⚠ 疑似「续时/时长不足」弹窗 —— 待确认按钮行为后可自动点击。');
+            }
+          }
+          return;   // 有弹窗时不再做流恢复判断（video 可能已不存在）
+        }
+        lastPopupKind = '';
+
         const v = this.vision.video;
         if (!v || v.tagName !== 'VIDEO') return;
 
