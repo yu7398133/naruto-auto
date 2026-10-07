@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.45
+// @version      0.6.46
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.45'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.46'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -936,14 +936,34 @@
      * ——做法：逻辑坐标 → 页面 client 坐标 → elementFromPoint 命中真实元素 →
      *   派发完整 pointer/mouse/click 序列（bubbles+composed，React/Vue 事件委托也能触发）。
      * @param {number} x @param {number} y 逻辑坐标
-     * @param {object} [opts] { xpath } 可选：优先按 XPath 定位（索引类 XPath 不稳，仅作兜底）
+     * @param {object} [opts] { selector, xpath } 可选：优先按 CSS 选择器 / XPath 定位
+     *   ⚠ 优先用 **selector**（如 '.share-wrap .close-btn'）—— 语义稳定、页面改版不易失效；
+     *     xpath 是用户当初从 DevTools 复制的索引路径（/html/body/div[9]/...），
+     *     结构一变就指到别的元素，只作兜底。
      * @returns {{ok:boolean, reason?:string, path?:string, at?:{x,y}, xpath?:boolean}}
      */
     domClick(x, y, opts) {
       const o = opts || {};
       let el = null, cx = 0, cy = 0, viaXpath = false;
 
-      if (o.xpath) {
+      // v0.6.46：CSS 选择器定位（首选）。语义化的 class 路径远比索引 XPath 稳。
+      if (!el && o.selector) {
+        try {
+          const node = document.querySelector(o.selector);
+          if (node) {
+            const b = node.getBoundingClientRect();
+            // 必须可见才认（页面里常有隐藏的模板节点）
+            const cs = getComputedStyle(node);
+            if (b.width > 0 && b.height > 0
+                && cs.display !== 'none' && cs.visibility !== 'hidden'
+                && parseFloat(cs.opacity) > 0.05) {
+              el = node; viaXpath = true;
+            }
+          }
+        } catch (e) { /* 选择器非法 → 退回坐标定位 */ }
+      }
+
+      if (!el && o.xpath) {
         try {
           const r = document.evaluate(o.xpath, document, null, 9, null);
           const node = r && r.singleNodeValue;
@@ -1195,62 +1215,78 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
      *  「32 分钟无有效操作」→ 弹「长时间未操作，已退出游戏」→ `video` 销毁。
      *  DOM 识别比像素识别可靠一个数量级：弹窗一出现就能立刻发现。
      *
-     *  ── 组件结构（2026-10-07 实测自 live 页面）──────────────────────────
-     *    div.message-wrap                 z-index 99999, position fixed, 全屏 1914×664
-     *      div.back                       遮罩（z:-1）
-     *      div.message-container          弹窗主体 362×177
-     *        div.close-btn                右上角 ×（24×24）
-     *        div.title                    「提示」
-     *        div.message-list > .list-item  正文
-     *        div.footer-container
-     *          div.footer-btn             "取消"
-     *          div.footer-btn.primary     "关闭窗口"   ← primary = 主按钮
+     *  ── 组件族（2026-10-07 实测自 live 页面）────────────────────────────
+     *  平台把「全屏遮罩浮层」做成了一套同构组件：z=99999 / fixed / `.back` 遮罩 /
+     *  `.close-btn` 关闭键。目前实测到两个成员：
      *
-     *  ⚠ 这是平台**通用**弹窗组件，续期/时长不足等提示应是同一套结构：
-     *    一律走 `.message-wrap`，靠 title/message 文本区分语义，靠 footer-btn 取按钮。
-     *    实测的这一个（已退出游戏）是**终局通知**，点掉也回不到战斗；
-     *    真正需要自动点的是「续期」那一个 —— 本函数负责把任意弹窗读成结构化数据，
-     *    至于怎么处置由调用方按文案决定。
+     *   ① div.message-wrap          1914×664   主体 362×177   按钮 .footer-btn
+     *        .message-container > .title + .message-list + .footer-container
+     *        正文实例：「长时间未操作，已退出游戏」
+     *        ⚠ 出现时 **videoCount=0**（`<video>` 已被平台销毁）→ 终局通知，点掉也回不到战斗
      *
-     *  @returns {null | {kind:string, title:string, text:string,
+     *   ② div.share-wrap            1914×663   主体 460×328   **无按钮**
+     *        .share-container > .share-header > .header-right > .close-btn
+     *                        > .share-body > img.qr-img + 「下载分享图」「复制链接」
+     *        正文实例：「生成分享图 / 使用手机QQ或微信扫描二维码后，点击右上角进行分享」
+     *        ⚠ 出现时 **video 完好**（count=1, rs=4）→ **可关闭的浮层，游戏还在跑**
+     *          这是最危险的一种：画面被盖住但流是活的，脚本只做像素识别时
+     *          完全无感，会一直「点哪都没反应」（10/7 那 47 批 no-ready 的征状）。
+     *
+     *  ⚠ 两者靠 `.close-btn` 这个共同 class 可统一处理；续期/时长不足等提示
+     *    预计也是同一族，按文案区分语义即可。本函数只**读**成结构化数据，
+     *    怎么处置由调用方决定。
+     *
+     *  @returns {null | {kind:string, wrap:string, title:string, text:string,
      *                    buttons:{text:string,primary:boolean,x:number,y:number}[],
+     *                    closeBtn:{x:number,y:number}|null,
      *                    rect:{x:number,y:number,w:number,h:number}}}
-     *           无弹窗或不可见时返回 null。只读，不点击、不改页面。 */
+     *           无浮层或不可见时返回 null。只读，不点击、不改页面。 */
     readPopup() {
       try {
         const roots = [document];
         document.querySelectorAll('iframe').forEach(f => {
           try { if (f.contentDocument) roots.push(f.contentDocument); } catch (e) { /* 跨域 */ }
         });
+        // 按优先级检查：先 message-wrap（终局通知，语义最重），再 share-wrap
+        const CANDIDATES = [
+          { wrap: '.message-wrap', kind: 'message' },
+          { wrap: '.share-wrap',   kind: 'share'   },
+        ];
         for (const root of roots) {
-          const w = root.querySelector('.message-wrap');
-          if (!w) continue;
-          const cs = getComputedStyle(w);
-          if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+          for (const c of CANDIDATES) {
+            const w = root.querySelector(c.wrap);
+            if (!w) continue;
+            const cs = getComputedStyle(w);
+            if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
 
-          const r = w.getBoundingClientRect();
-          const title = (w.querySelector('.title')?.textContent || '').trim();
-          const text = (w.querySelector('.message-list')?.textContent || '').replace(/\s+/g, ' ').trim();
-          const buttons = [...w.querySelectorAll('.footer-btn')].map(b => {
-            const br = b.getBoundingClientRect();
-            return {
-              text: (b.textContent || '').trim(),
-              primary: b.classList.contains('primary'),
-              x: Math.round(br.x + br.width / 2),
-              y: Math.round(br.y + br.height / 2),
-            };
-          });
-          const closeX = w.querySelector('.close-btn');
+            const r = w.getBoundingClientRect();
+            const title = (w.querySelector('.title')?.textContent || '').trim();
+            const text = (w.querySelector('.message-list')?.textContent || '').replace(/\s+/g, ' ').trim();
+            const buttons = [...w.querySelectorAll('.footer-btn')].map(b => {
+              const br = b.getBoundingClientRect();
+              return {
+                text: (b.textContent || '').trim(),
+                primary: b.classList.contains('primary'),
+                x: Math.round(br.x + br.width / 2),
+                y: Math.round(br.y + br.height / 2),
+              };
+            });
+            const closeEl = w.querySelector('.close-btn');
+            const closeBtn = closeEl && (() => {
+              const c2 = closeEl.getBoundingClientRect();
+              return { x: Math.round(c2.x + c2.width / 2), y: Math.round(c2.y + c2.height / 2) };
+            })();
 
-          // 语义分类：供调用方按场景决定处置方式
-          let kind = 'generic';
-          if (/长时间未操作|已退出游戏/.test(text + title)) kind = 'idle-kick';
-          else if (/时长不足|体验时长|剩余时长|续时|继续体验|开通会员/.test(text + title)) kind = 'renew';
+            // 语义分类：供调用方按场景决定处置方式
+            let kind = c.kind;   // 'message' | 'share'
+            const all = (title + ' ' + text + ' ' + (w.innerText || ''));
+            if (/长时间未操作|已退出游戏/.test(all)) kind = 'idle-kick';
+            else if (/生成分享图|二维码|分享图/.test(all)) kind = 'share';
+            else if (/时长不足|体验时长|续时|继续体验|开通会员|续费/.test(all)) kind = 'renew';
 
-          return { kind, title, text, buttons,
-                   closeBtn: closeX ? (() => { const c = closeX.getBoundingClientRect();
-                     return { x: Math.round(c.x + c.width / 2), y: Math.round(c.y + c.height / 2) }; })() : null,
-                   rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+            return { kind, wrap: c.wrap, title, text, buttons, closeBtn,
+                     rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } };
+          }
         }
         return null;
       } catch (e) { return null; }
@@ -4597,7 +4633,12 @@ async function dragScene(ctx, dir) {
       const l = label || this._nameRef(c);
       this._advance(l);                 // 流程图推进（每个步骤只推进一次，兜底点击不要再调）
       let r = { ok: false, reason: 'domClick 不可用' };
-      try { r = this.op.domClick(x, y, opts) || r; }
+      // ⚠ v0.6.46 修正：domClick 定义在 **SdkAdapter**（页面层点击适配器）上，
+      //   而 op 是 GameOperator —— 适配器存在 op.sdk 里。
+      //   旧写法 `op.domClick(...)` 一直是 `is not a function`：
+      //   于是「关分享图」这个步骤**从来没有真正生效过**，只是静默失败后
+      //   退回点 video（覆盖层收不到事件）→ 弹窗一直留着盖住画面。
+      try { r = this.op.sdk.domClick(x, y, opts) || r; }
       catch (e) { r = { ok: false, reason: (e && e.message) || String(e) }; }
       if (r.ok) {
         Utils.log('info', `    🖱 页面层点击「${l}」@(${x},${y}) → 命中 ${r.path}`
@@ -5131,9 +5172,38 @@ async function dragScene(ctx, dir) {
   //  ⚠ 除 nav 组外坐标均为估算值，需按实际画面校准
   // ============================================================
 
-  // 分享生成的图：关闭按钮的宿主页面 DOM 覆盖层路径（2026-09-12 用户从 DevTools 复制）
-  // ⚠ 索引类 XPath（div[9]）会随页面结构变化而失效，仅作兜底；主路径仍按坐标 elementFromPoint 定位
+  // 分享生成的图：关闭按钮的宿主页面 DOM 覆盖层路径
+  // v0.6.46：主路径改为 **CSS 选择器** '.share-wrap .close-btn'（2026-10-07 从 live 页面实测）。
+  //   实测结构：.share-wrap(z=99999,fixed,全屏) > .back 遮罩
+  //             > .share-container > .share-header > .header-right > .close-btn(cursor:pointer)
+  //   ⚠ 关闭时 <video> **完好**（count=1, rs=4）—— 说明这是「可关闭的浮层」，
+  //     不像 .message-wrap（那是「已退出」终局通知，出现时 video 已销毁）。
+  //     两者同属平台遮罩组件族（都是 z=99999 + .back + .close-btn），但语义不同。
+  // 用户提供的索引 XPath 保留作兜底：/html/body/div[9]/... 会随页面结构变化而失效。
+  const SHARE_CLOSE_SELECTOR = '.share-wrap .close-btn';
   const SHARE_IMG_CLOSE_XPATH = '/html/body/div[9]/div/div[2]/div[1]/div[3]';
+
+  /** v0.6.46：关闭平台级浮层（分享图/活动弹窗），返回是否成功。
+   *  这类浮层盖在画面上但 **不销毁 video**，脚本若不处理就会一直「点哪都没反应」
+   *  （10/7 那 47 批 no-ready 正是这种征状）。三级兜底：选择器 → XPath → 坐标。 */
+  async function closeHostOverlay(ctx, label, coord, selector, xpath) {
+    const [cx, cy] = coord;
+    // ① 首选：CSS 选择器（语义稳定，改版不易失效）
+    // ⚠ domClick 在 SdkAdapter 上（op.sdk），不是 op 本身 —— 见 domTap 里的说明
+    let r = { ok: false };
+    try { r = ctx.op.sdk.domClick(cx, cy, { selector }) || r; } catch (e) {}
+    if (!r.ok && xpath) {
+      // ② 兜底：用户提供的索引 XPath
+      try { r = ctx.op.sdk.domClick(cx, cy, { xpath }) || r; } catch (e) {}
+    }
+    if (!r.ok) {
+      // ③ 末选：按坐标 elementFromPoint 命中（不依赖任何路径）
+      try { r = ctx.op.sdk.domClick(cx, cy) || r; } catch (e) {}
+    }
+    if (r.ok) Utils.log('info', `    🖱 已关闭「${label}」→ ${r.path}${r.xpath ? ' [按路径定位]' : ''}`);
+    else Utils.log('warn', `    ⚠ 未能关闭「${label}」：${r.reason || '未知'}`);
+    return !!r.ok;
+  }
 
   // 小队突袭步骤常量（预览 + 运行共用）。0.5.63 全量按 2026-09-16 用户录制「小队突袭.json」重录：
   // 界面已改版（BOSS 页「宇智波鼬 S」，右下按钮为「挑战」），旧「进入 (1173,617) → 金币多倍弹窗」流程废弃。
@@ -6815,19 +6885,10 @@ function loadRealmNameTemplates() {
         await ctx.tap([1208, 665], null, '确认分享');
         await Utils.sleep(3000);   // 校准间隔 5.4s：分享动画+奖励弹窗
         // ⚠ 分享生成的图是**宿主页面 DOM 覆盖层**（如 /html/body/div[9]/...），不在云游戏 video 里。
-        //   主点击通道把事件派发到 video，这类覆盖层永远收不到 → 必须走页面层点击（domTap）。
-        const closed = await ctx.domTap([866, 204], '关奖励弹窗');
-        if (!closed) {
-          // 兜底 1：按用户提供的 DOM 路径定位（索引类 XPath 会随页面结构变化，仅作兜底）
-          let byX = { ok: false };
-          try { byX = ctx.op.domClick(866, 204, { xpath: SHARE_IMG_CLOSE_XPATH }) || byX; } catch (e) {}
-          if (byX.ok) Utils.log('info', `    🖱 按 DOM 路径关闭分享图成功 → ${byX.path}`);
-          else {
-            // 兜底 2：仍按游戏画面层点一次（若该弹窗其实在画面内）
-            await ctx.op.clickNatural(866, 204, null, '关奖励弹窗(游戏层兜底)');
-            await Utils.sleep(1000);
-          }
-        }
+        //   主点击通道把事件派发到 video，这类覆盖层永远收不到 → 必须走页面层点击（domClick）。
+        //   v0.6.46：改走 closeHostOverlay —— 主路径用 CSS 选择器 '.share-wrap .close-btn'
+        //   （2026-10-07 live 实测；旧版只按坐标 (866,204) 猜，弹窗尺寸/位置一变就落空）。
+        await closeHostOverlay(ctx, '分享图', [866, 204], SHARE_CLOSE_SELECTOR, SHARE_IMG_CLOSE_XPATH);
         await ctx.home();
 
       }
@@ -10890,7 +10951,8 @@ function loadRealmNameTemplates() {
           if (sig !== lastPopupKind) {
             lastPopupKind = sig;
             const btns = popup.buttons.map(b => `「${b.text}」@(${b.x},${b.y})${b.primary ? '[primary]' : ''}`).join(' ');
-            Utils.log('error', `🪟 检测到平台弹窗 [${popup.kind}] ${popup.title}：${popup.text}　按钮: ${btns}`);
+            Utils.log('warn', `🪟 检测到平台浮层 [${popup.kind}] (${popup.wrap}) ${popup.title}：${popup.text}`
+              + (btns ? `　按钮: ${btns}` : '') + (popup.closeBtn ? `　×@(${popup.closeBtn.x},${popup.closeBtn.y})` : ''));
             if (popup.kind === 'idle-kick') {
               Utils.log('error', '⛔ 云游戏已判定「长时间未操作，已退出游戏」——会话已结束（<video> 已销毁），'
                 + '点掉弹窗也回不到战斗。**停止任务**，请重新进入游戏。');
@@ -10898,7 +10960,35 @@ function loadRealmNameTemplates() {
               Utils.log('warn', '⚠ 疑似「续时/时长不足」弹窗 —— 待确认按钮行为后可自动点击。');
             }
           }
-          return;   // 有弹窗时不再做流恢复判断（video 可能已不存在）
+
+          // ── v0.6.46：share-wrap 类浮层**自动关闭** ──────────────────────
+          //  判据：浮层在但 `<video>` 仍然完好（rs>=2）⇒ 这是「可关闭的遮盖层」，
+          //  游戏本身没结束，关掉即可继续。这与 idle-kick 有本质区别：
+          //  后者 video 已销毁，关不关都没用。
+          //  ⚠ 只点 `.share-wrap .close-btn` 这个明确的关闭键，绝不点遮罩/画面，
+          //    避免误触发别的交互。
+          if (popup.kind === 'share' && popup.closeBtn) {
+            const v0 = this.vision.video;
+            if (v0 && v0.tagName === 'VIDEO' && v0.readyState >= 2) {
+              const t = Date.now();
+              if (!this._shareCloseBusy && t - (this._shareCloseAt || 0) > 3000) {
+                this._shareCloseBusy = true;
+                this._shareCloseAt = t;
+                try {
+                  const r = this.op.sdk.domClick(popup.closeBtn.x, popup.closeBtn.y,
+                    { selector: '.share-wrap .close-btn' });
+                  if (r && r.ok) {
+                    Utils.log('info', `✓ 已自动关闭「分享图」浮层（画面被它盖住会导致识别全失效）→ ${r.path}`);
+                  } else {
+                    Utils.log('warn', `⚠ 自动关闭「分享图」未生效：${(r && r.reason) || '未知'}`);
+                  }
+                } catch (e) {
+                  Utils.log('warn', `⚠ 自动关闭「分享图」异常：${(e && e.message) || e}`);
+                } finally { this._shareCloseBusy = false; }
+              }
+            }
+          }
+          return;   // 有浮层时不再做流恢复判断（画面被盖，识别结果不可信）
         }
         lastPopupKind = '';
 
