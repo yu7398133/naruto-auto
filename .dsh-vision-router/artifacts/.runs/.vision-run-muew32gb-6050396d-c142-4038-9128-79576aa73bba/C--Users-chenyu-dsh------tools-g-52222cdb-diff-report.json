@@ -1,0 +1,57 @@
+{
+  "original": "C:\\Users\\chenyu\\dsh\\火影忍者\\tools\\gift-frames2\\s1.jpg",
+  "rebuilt": "C:\\Users\\chenyu\\dsh\\火影忍者\\tools\\gift-frames2\\s2.jpg",
+  "threshold": 16,
+  "width": 320,
+  "height": 180,
+  "differingPixels": 29014,
+  "totalPixels": 57600,
+  "diffRatio": 0.5037,
+  "worstRegions": [
+    {
+      "x1": 80,
+      "y1": 46,
+      "x2": 120,
+      "y2": 69,
+      "ratio": 0.8587,
+      "differing": 790,
+      "total": 920
+    },
+    {
+      "x1": 120,
+      "y1": 46,
+      "x2": 160,
+      "y2": 69,
+      "ratio": 0.8402,
+      "differing": 773,
+      "total": 920
+    },
+    {
+      "x1": 80,
+      "y1": 115,
+      "x2": 120,
+      "y2": 138,
+      "ratio": 0.837,
+      "differing": 770,
+      "total": 920
+    },
+    {
+      "x1": 120,
+      "y1": 69,
+      "x2": 160,
+      "y2": 92,
+      "ratio": 0.8217,
+      "differing": 756,
+      "total": 920
+    },
+    {
+      "x1": 80,
+      "y1": 92,
+      "x2": 120,
+      "y2": 115,
+      "ratio": 0.8163,
+      "differing": 751,
+      "total": 920
+    }
+  ]
+}

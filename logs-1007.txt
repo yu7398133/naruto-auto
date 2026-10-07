@@ -1,0 +1,10 @@
+火影自动化 v0.6.43 日志
+导出时间: 2026/10/7 20:26:21
+共 6 条
+────────────────────────────────────────────────────────────
+[20:26:07] ✓ SDK 就绪: Oprate — Oprate[clickElement,mouseDownElement,mouseUpElement,mouseMoveElement,keyDownElement,keyUpElement,keyPressElement,clickWindow,mouseDownWindow,mouseUpWindow,mouseMoveWindow,keyDownWindow,keyUpWindow,keyPressWindow]
+[20:26:07] ✓ 初始化完成。控制台可用 __narutoAuto.probe() 查看当前场景
+[20:26:07] 🍥 面板已收起为左下角悬浮球（避免遮挡游戏右上角）。点击悬浮球 / Ctrl+Shift+A / __narutoAuto.show() 展开；双击悬浮球直接开跑。
+[20:26:07] SDK 就绪，可以开始执行任务
+[20:26:15] ✓ 已捕获画面元素 <video> 1920x1080
+[20:26:16] 👁 页面回到前台。
