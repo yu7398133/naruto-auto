@@ -43,10 +43,17 @@ const getJSON = (p) => new Promise((res, rej) => {
 let ws = null, msgId = 0;
 const pending = new Map();
 
+/** 底层发送：只发不等超时（超时由调用方控制） */
+function rawSend(method, params) {
+  const i = ++msgId;
+  return new Promise(res => { pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+}
+
 async function connect() {
   const tabs = await getJSON('/json/list');
   const tab = tabs.find(t => t.type === 'page' && /arm-game|start\.qq\.com\/game/.test(t.url));
   if (!tab) throw new Error('没找到云游戏标签页');
+  targetId = tab.id;
   ws = new WebSocket(tab.webSocketDebuggerUrl);
   ws.addEventListener('message', ev => {
     const j = JSON.parse(ev.data);
@@ -56,18 +63,10 @@ async function connect() {
     ws.addEventListener('open', res);
     ws.addEventListener('error', rej);
   });
-  const send = (m, p) => new Promise(r => { const i = ++msgId; pending.set(i, r); ws.send(JSON.stringify({ id: i, method: m, params: p })); });
+  const send = (m, p) => rawSend(m, p);
   await send('Runtime.enable', {});
-  // ⚠ CDP 的 Input 域是惰性附着的：**第一条** Input 命令会触发域初始化，
-  //    而它本身不会被应答 —— 表现为 Promise 永不 resolve。
-  //    实测：不热身时 dispatchMouseEvent 超时；先随便发一条（哪怕报 -32601）之后就正常。
-  //    这里发一次带超时的热身，丢掉结果。
-  try {
-    await Promise.race([
-      send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: -1, y: -1, button: 'none' }),
-      new Promise(r => setTimeout(r, 700)),
-    ]);
-  } catch (e) { /* 唤醒用，失败无所谓 */ }
+  // 连上就把标签页激活：后台标签的 Input 命令会被静默吞掉（见 ensureActive 注释）
+  await ensureActive();
   return { tab, send };
 }
 
@@ -112,6 +111,40 @@ async function menuClosed() {
   return v === true;
 }
 
+/** 当前标签页的 targetId（激活用） */
+let targetId = null;
+
+/**
+ * 丢弃当前连接，强制下一次用到时重建（页面 reload 后旧会话会失效）。
+ */
+function dropConnection() {
+  try { if (ws) ws.close(); } catch (e) {}
+  ws = null;
+  for (const [, res] of pending) { try { res({}); } catch (e) {} }
+  pending.clear();
+}
+
+/**
+ * 确保游戏标签是「活动标签」，否则 CDP 的 Input 命令会被**静默吞掉**。
+ *
+ * 2026-10-08 实测（这是本代理最关键的一条结论）：
+ *   当游戏页处于后台（`document.visibilityState === 'hidden'`）时，
+ *   `Input.dispatchMouseEvent` **既不应答也不报错** —— Promise 永不 resolve，
+ *   日志表现为 `超时 3000ms: move`。而同一时刻 `Runtime.evaluate` 完全正常。
+ *   对照实验：调用 `Target.activateTarget` 之后，
+ *   连续 4 条 mouseMoved **全部**立即应答（4/4）。
+ *
+ *   所以「热身」是错的解释：真正决定成败的是标签页可见性。后台标签不发 Input。
+ *   ⇒ 每次保活前先激活标签，做完之后不再管（用户切走自然会再 hidden，
+ *     下一轮保活又会重新激活一次）。
+ */
+async function ensureActive() {
+  if (!targetId) return;
+  try {
+    await withTimeout(rawSend('Target.activateTarget', { targetId }), 2000, 'activate');
+  } catch (e) { /* 激活失败也继续，后面自然超时重连 */ }
+}
+
 async function main() {
   // 开机自启时云游戏标签页可能还没打开 —— 轮询等待，别退出
   for (let i = 0; ; i++) {
@@ -142,6 +175,9 @@ async function main() {
       if (job && job.steps) {
         idle = 0;
         log(`收到保活请求 ${job.id}：${job.steps.map(s => s.type + '(' + s.x + ',' + s.y + ')').join(' → ')}`);
+        // 用户可能切走了标签（后台标签不发 Input）→ 先激活再操作
+        await ensureActive();
+        await sleep(250);
         await runSteps(job.steps);
         log('  步骤已发完，检查菜单状态…');
         const ok = await menuClosed();
@@ -153,9 +189,9 @@ async function main() {
         if (idle % 60 === 0) log(`待命中…（已轮询 ${idle} 次）`);
       }
     } catch (e) {
-      log('轮询异常：' + ((e && e.message) || e));
-      try { ws.close(); } catch (_) {}
-      await sleep(3000);
+      log('轮询异常：' + ((e && e.message) || e) + ' → 丢弃旧连接重建');
+      dropConnection();
+      await sleep(1500);
       try { ({ send } = await connect()); log('已重连'); } catch (e2) { log('重连失败：' + e2.message); }
     }
     await sleep(POLL_MS);
