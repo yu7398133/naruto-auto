@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.49
+// @version      0.6.52
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.49'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.52'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -6781,6 +6781,12 @@ const MissionHall = {
       const good = ok && !after.open;
       if (good) {
         Utils.log('info', `  💤 ${tag}：设置菜单 开→关，画面已复原`);
+        // 2026-10-08 用户实测：「打开菜单还没点，然后就到了任务集会所了」。
+        // 根因：`.setting-box` 的 focus 类在**退场动画开始**时就消失，
+        // 脚本据此判"已复原"立刻放行，任务的下一次点击落在半退场画面上，
+        // 被游戏解释成点到了任务集会所。外部代理已加"稳定关闭"判定，
+        // 这里再补一段沉降期，确保遮罩淡出和平台输入队列都排空后才交还控制权。
+        await Utils.sleep(900);
       } else {
         // 保活是可选增强（需外部 node tools\keepalive-agent.js）。
         // 代理没开是正常状态，只记 debug，不刷警告。
@@ -9796,6 +9802,30 @@ const MissionHall = {
         s.textContent = UI_CSS;
         document.head.appendChild(s);
       }
+      // ── v0.6.50：多实例互斥 ───────────────────────────────────────────
+      //  现象（2026-10-08 实测）：Tampermonkey 更新脚本时会向**已打开的页面**
+      //  再注入一份新副本，旧副本不会被卸载 —— 同页曾同时存在 #na-panel 0.6.49
+      //  与 0.6.47，两个悬浮球。单纯"挂载前删掉同 id 节点"是**不够的**，反而更糟：
+      //  两个实例都会执行 create()，后执行的那个会把先执行的那个面板删掉，
+      //  结果是留下先跑的旧实例、清掉后跑的新实例（实测出现过 0 个面板）。
+      //
+      //  正确做法：用页面级单例锁。新实例写入自己的版本号，
+      //  旧实例发现锁里的版本比自己新就**整体放弃**（不再建面板、不再跑任务），
+      //  这样旧实例的定时器也会随实例一起变成惰性的，不会跟新实例抢操作。
+      const LOCK = '__narutoAutoOwner';
+      const prev = Number(window[LOCK] || 0);
+      const mine = Number((VERSION || '0').split('.').map((x, i) => (+x) * Math.pow(1000, 2 - i)).reduce((a, b) => a + b, 0));
+      if (prev > mine) {
+        Utils.log('debug', `检测到更新的实例 v${window.__narutoAutoOwnerVer}，本实例 v${VERSION} 退出。`);
+        this._superseded = true;   // ControlPanel 上的标记，供 NarutoAuto 启动流程检查
+        return;
+      }
+      window[LOCK] = mine;
+      window.__narutoAutoOwnerVer = VERSION;
+      // 清掉更旧实例留下的孤儿 DOM
+      for (const id of ['na-panel', 'na-fab']) {
+        document.querySelectorAll('#' + id).forEach(el => el.remove());
+      }
       this.panel = document.createElement('div');
       this.panel.id = 'na-panel';
       this.panel.innerHTML = this._html();
@@ -10834,6 +10864,9 @@ const MissionHall = {
 
       // 面板先起来，SDK / 画面异步探测，避免面板等到 30s 才出现
       this.panel.create();
+      // v0.6.50：本实例已被更新的副本接管 → 什么都不做，直接退出。
+      // 不要 start/建定时器/覆盖 window.__narutoAuto，否则会和存活实例抢输入。
+      if (this.panel._superseded) return;
 
       window.__narutoAuto = {
         app: this,

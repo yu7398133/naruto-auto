@@ -111,6 +111,25 @@ async function menuClosed() {
   return v === true;
 }
 
+/**
+ * 等菜单**稳定**关闭：连续两次相隔 400ms 都读到关闭才算数。
+ *
+ * 2026-10-08 用户实测反馈：「打开菜单还没点，然后就到了任务集会所了」。
+ * 日志佐证 —— 保活宣告成功 2 秒后（11:51:18 → 11:51:20）任务就点了 (62,677)。
+ * 原因是 `.setting-box` 的 focus 类在**退场动画开始**时就没了，
+ * 而遮罩（.setting-container）此时还在淡出、平台的输入队列也还没消化完。
+ * 脚本以为"已复原"就放行，任务的下一次点击落在**半退场状态**的画面上，
+ * 被游戏解释成点到了任务集会所入口。
+ *
+ * 所以要等到"关"这个状态**连续成立**，并且在返回前再留一段沉降时间，
+ * 让遮罩动画和游戏输入队列都排空。
+ */
+async function menuSettledClosed() {
+  if (!await menuClosed()) return false;
+  await sleep(400);
+  return await menuClosed();
+}
+
 /** 当前标签页的 targetId（激活用） */
 let targetId = null;
 
@@ -179,10 +198,12 @@ async function main() {
         await ensureActive();
         await sleep(250);
         await runSteps(job.steps);
-        log('  步骤已发完，检查菜单状态…');
-        const ok = await menuClosed();
+        log('  步骤已发完，等待画面沉降…');
+        // 关键：必须等菜单**稳定**关闭再回报，否则上层会在退场动画中途放行任务
+        const ok = await menuSettledClosed();
+        if (ok) await sleep(500);   // 再留一段，让平台输入队列排空
         await ev(`window.__narutoAuto.kaDone(${JSON.stringify(job.id)}, ${ok})`);
-        log(`  ${ok ? '✓ 菜单已关，画面复原' : '⚠ 菜单仍未关'}`);
+        log(`  ${ok ? '✓ 菜单已关且已沉降，画面复原' : '⚠ 菜单仍未关'}`);
         if (ONCE) { log('--once：处理完一轮退出'); ws.close(); return; }
       } else {
         idle++;
