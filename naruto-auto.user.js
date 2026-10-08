@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.48
+// @version      0.6.49
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.48'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.49'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -11173,7 +11173,7 @@ const MissionHall = {
               Utils.log('error', '⛔ 云游戏已判定「长时间未操作，已退出游戏」——会话已结束（<video> 已销毁），'
                 + '点掉弹窗也回不到战斗。**停止任务**，请重新进入游戏。');
             } else if (popup.kind === 'renew') {
-              Utils.log('warn', '⚠ 疑似「续时/时长不足」弹窗 —— 已存档其按钮/文本（__narutoAuto.popupLog()），待确认行为后可自动点击。');
+              Utils.log('warn', '⚠ 检测到「续时/时长不足」弹窗 —— 若视频仍存活将自动点「继续体验」免费续时。');
             }
           }
 
@@ -11201,6 +11201,35 @@ const MissionHall = {
                 } catch (e) {
                   Utils.log('warn', `⚠ 自动关闭「分享图」异常：${(e && e.message) || e}`);
                 } finally { this._shareCloseBusy = false; }
+              }
+            }
+          }
+
+          // ── v0.6.49：renew 浮层**自动续时** ─────────────────────────────
+          //  实测样本（2026/10/7 22:49:09，已存 localStorage）：
+          //    标题「体验时长不足」，按钮 [退出 / 继续体验(primary)]，
+          //    且此时 <video> 仍存活（rs=4, paused=false）—— 说明这是**免费续时**，
+          //    不是付费/开通会员页。与 share 同一安全判据：video 活着 ⇒ 可点。
+          //  ⚠ 只点 primary「继续体验」；「退出」绝不碰。video 已死（idle-kick）时不动作。
+          //  ⚠ 若将来出现真正的付费弹窗，其按钮文案不会是「继续体验」，故此匹配是安全的。
+          if (popup.kind === 'renew') {
+            const v0 = this.vision.video;
+            const btn = (popup.buttons || []).find(b => /继续体验|继续游戏|继续/.test(b.text));
+            if (v0 && v0.tagName === 'VIDEO' && v0.readyState >= 2 && btn) {
+              const t = Date.now();
+              if (!this._renewBusy && t - (this._renewAt || 0) > 10000) {
+                this._renewBusy = true;
+                this._renewAt = t;
+                try {
+                  const r = this.op.sdk.domClick(btn.x, btn.y, { selector: '.message-wrap .footer-btn.primary' });
+                  if (r && r.ok) {
+                    Utils.log('info', `✓ 已自动点击「${btn.text}」续时（免费续时，画面仍在）→ ${r.path}`);
+                  } else {
+                    Utils.log('warn', `⚠ 自动续时未生效：${(r && r.reason) || '未知'}`);
+                  }
+                } catch (e) {
+                  Utils.log('warn', `⚠ 自动续时异常：${(e && e.message) || e}`);
+                } finally { this._renewBusy = false; }
               }
             }
           }
