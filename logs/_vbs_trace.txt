@@ -1,0 +1,6 @@
+2026/10/8 1:35:42 start; ScriptFullName=C:\Users\chenyu\dsh\火影忍者\tools\_vbs_trace.vbs
+2026/10/8 1:35:42 repo=C:\Users\chenyu\dsh\火影忍者
+2026/10/8 1:35:42 agent exists=True
+2026/10/8 1:35:42 nodeExe=C:\Program Files\nodejs\node.exe exists=True
+2026/10/8 1:35:42 about to Run
+2026/10/8 1:35:42 Run err=0 desc=

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.47
+// @version      0.6.48
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.47'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.48'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -6268,7 +6268,13 @@ function loadRealmNameTemplates() {
     });
   }
 
-  const MissionHall = {
+  /** v0.6.47：保活握手状态（模块级，供页面 API 与 MissionHall 共用）。
+ *  ⚠ 必须放在这里而不是挂在 __narutoAuto 字面量上：那些 API 是箭头函数，
+ *     `this` 指向 NarutoAuto 实例，用 this 存状态会与 __narutoAuto.x 读到的
+ *     不是同一个对象 —— 代理端永远取不到任务（曾实际踩到）。 */
+const KA = { pending: {}, lastSeen: 0 };
+
+const MissionHall = {
     /** 取一块区域的 RGB 均值 */
     _mean(D, W, cx, cy, hw, hh) {
       let r = 0, g = 0, b = 0, n = 0;
@@ -6790,21 +6796,19 @@ function loadRealmNameTemplates() {
      *  超时 6s（外部进程 1s 轮询，足够）。
      *  没有外部进程时静默超时 —— 保活是**可选增强**，不该刷警告打扰日志。 */
     async _kaRequest(app, tag, steps) {
-      const api = window.__narutoAuto;
-      if (!api || typeof api.kaTake !== 'function') return false;
       const id = 'ka' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      app.__kaPending = app.__kaPending || {};
-      app.__kaPending[id] = { steps, at: Date.now(), done: null };
+      // ⚠ 必须用模块级 KA，不能写 app.__kaPending —— 外部进程读的是 KA.pending
+      KA.pending[id] = { steps, at: Date.now(), done: null };
       const t0 = Date.now();
       while (Date.now() - t0 < 6000) {
-        const r = app.__kaPending[id];
+        const r = KA.pending[id];
         if (r && r.done !== null) {
-          delete app.__kaPending[id];
+          delete KA.pending[id];
           return !!r.done;
         }
         await Utils.sleep(200);
       }
-      delete app.__kaPending[id];
+      delete KA.pending[id];
       return false;
     },
 
@@ -10851,22 +10855,28 @@ function loadRealmNameTemplates() {
         // ── v0.6.47 保活握手协议（供 tools/keepalive-agent.js 使用）──────────
         // 页面内无法伪造真实指针事件（见 MissionHall._keepAliveMenu 注释），
         // 所以由外部 CDP 进程取走步骤、发真实事件、再回报结果。
-        __kaPending: null,
+        //
+        // ⚠ 状态必须放在**模块级闭包变量 KA** 里，不能用 `this`：
+        //   这些函数挂在 window.__narutoAuto 字面量上，而箭头函数的 `this`
+        //   指向 NarutoAuto 实例 —— 写 this.x 和读 __narutoAuto.x 是两个不同对象，
+        //   代理端会永远读到空。曾经因此导致 kaPing 全部失效。
         kaTake: () => {
-          const pend = (this.__kaPending || {});
-          for (const id of Object.keys(pend)) {
-            const r = pend[id];
+          const now = Date.now();
+          KA.lastSeen = now;
+          for (const id of Object.keys(KA.pending)) {
+            const r = KA.pending[id];
             if (r && r.done === null) return { id, steps: r.steps };
           }
           return null;
         },
         kaDone: (id, ok) => {
-          const pend = (this.__kaPending || {});
-          if (pend[id]) pend[id].done = !!ok;
+          KA.lastSeen = Date.now();
+          if (KA.pending[id]) KA.pending[id].done = !!ok;
           return true;
         },
-        kaExternalAlive: () => Date.now() - (this.__kaSeenAt || 0) < 10000,
-        kaPing: () => { this.__kaSeenAt = Date.now(); return true; },
+        kaExternalAlive: () => KA.lastSeen > 0 && Date.now() - KA.lastSeen < 15000,
+        kaPing: () => { KA.lastSeen = Date.now(); return true; },
+        kaSeenAt: () => KA.lastSeen,
         // 平台弹窗观测记录（renew 续期弹窗至今无真实样本，先攒数据）
         popupLog: (n) => { const a = this.vision.popupLog(); return n ? a.slice(-n) : a; },
         popupLogClear: () => { try { localStorage.removeItem('na_popup_log_v1'); return 'cleared'; } catch (e) { return 'err'; } },
