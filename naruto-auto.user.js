@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.59
+// @version      0.6.60
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.59'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.60'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -3776,7 +3776,15 @@ async function dragScene(ctx, dir) {
           return false;
         }
 
-        const noVision = scene === 'error' || scene === SCENE.UNKNOWN;
+        // ★ v0.6.59：修「死值」—— SCENE.UNKNOWN 永远不可能出现在这里。
+        //  SceneDetector.detect() 末尾有一句 `if (out.scene === SCENE.UNKNOWN)
+        //  out.scene = SCENE.OTHER;`（L2241），把 UNKNOWN 全部改写成 OTHER。
+        //  于是原判据 `scene === SCENE.UNKNOWN` **恒为假** ⇒ 「视觉失效 ⇒ 盲按返回」
+        //  这条安全分支从来没生效过：一旦取像素/探针全挂（scene 恒为 OTHER），
+        //  走的是「视觉正常」分支去点 backBtnX/returnBtn —— 而那些探针同样取不到像素，
+        //  结果是反复点无效坐标，卡死在「未能确认回到主界面」。
+        //  改判据：以 detect() 明确回报的 error 为准（取像素失败、vision 抛错等）。
+        const noVision = scene === 'error' || !!(r && r.error);
         if (forceBlind || noVision) {
           if (noVision && !forceBlind && i === 0) {
             Utils.log('warn', `⚠ 场景无法识别（${r && r.error || scene}），改用盲按返回。建议先用诊断器确认画面取像素是否正常。`);
@@ -4108,7 +4116,8 @@ async function dragScene(ctx, dir) {
       //  ⚠ 阈值取 45s：远大于正常单局时长波动，正常打不会误触发；
       //    真误触发也只是提前松手，由 playOneArenaRound 的 waitArenaReady 接住续局。
       this._rbStallSince = 0;      // 最近一次「有任何战斗信号」的时间戳
-      this._rbStallMs = 45000;     // 45s 无任何战斗信号 ⇒ 判定已不在战斗
+      this._rbStallMs = 45000;     // 45s 无任何战斗信号 ⇒ 判定已不在战斗（慢速兜底）
+      this._rbReadyAt = 0;         // 上次用「准备界面探针」探测的时间（6s 节流）
 
       // ══ v0.6.43：独立高频结算探针 ══════════════════════════════════════════
       //  根因（2026-10-06 实测，用户口径「加快识别结算画面的频率才能根治」）：
@@ -4337,13 +4346,35 @@ async function dragScene(ctx, dir) {
             } else {
               this._rbMissCnt = (this._rbMissCnt || 0) + 1;
 
-              // ★ v0.6.59：死锁保险 —— 「第X回」不可达时，用时间兜底强制松手。
-              //   见 waitForEnd 开局处注释：阈值 90 让 _rbMissCnt 永远到不了 4，
-              //   连点器会锁死。这里不依赖该阈值，只看「多久没有任何战斗信号」。
+              // ★ v0.6.59：死锁保险（两段式）。
+              //  见 waitForEnd 开局处注释：阈值 90 让 _rbMissCnt 永远到不了 4，
+              //  连点器会锁死。这里不依赖该阈值，改用**时间 + 旧探针**双重兜底。
               if (this._rbSeen) {
                 const nowMs = Date.now();
                 if (!this._rbStallSince) this._rbStallSince = nowMs;
                 const stalled = nowMs - this._rbStallSince;
+
+                // ⓵ 快速通道（v0.6.59）：每 ~6s 用**已有的准备界面探针**查一次。
+                //    它标定极干净（感叹号 正0/负≥22.98，红X 正0.3018/负≤0.2397），
+                //    远比其他判据可靠 ⇒ 一旦命中即**确知**已回到准备界面，立即松手，
+                //    不必再干等 45s。这是本保险的主路径。
+                if (stalled >= 6000 && nowMs - (this._rbReadyAt || 0) >= 6000) {
+                  this._rbReadyAt = nowMs;
+                  let rdy = null;
+                  try { rdy = await this.nav.waitArenaReady(1200); } catch (e) { rdy = null; }
+                  if (rdy && rdy.ok) {
+                    this.op && this.op.releaseHold && this.op.releaseHold();
+                    Utils.log('warn', `    ⏱ 「第X回」已消失 ${Math.round(stalled / 1000)}s`
+                      + `（阈值 ${ARENA_ROUND_THRESH} 不可达），但**准备界面探针命中**`
+                      + `（${rdy.why}）→ 确认已回到战斗准备界面，松开连点器（死锁保险 v0.6.59）`);
+                    this._rbLogged = false;
+                    this._rbStallSince = 0;
+                    return 'round-gone';
+                  }
+                }
+
+                // ⓶ 慢速兜底：万一准备界面探针也不可用（面板还开着/在别的页），
+                //    纯时间上限强制松手，避免无限锁死。
                 if (stalled >= this._rbStallMs) {
                   this.op && this.op.releaseHold && this.op.releaseHold();
                   Utils.log('warn', `    ⏱ 连续 ${Math.round(stalled / 1000)}s 无任何战斗信号`
