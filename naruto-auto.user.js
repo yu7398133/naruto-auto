@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.56
+// @version      0.6.58
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.56'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.58'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -250,12 +250,14 @@
       //   （对比：真正判成 HOME 的那一帧 storeIcon:18 + dailyIcon:28，中 2 个。）
       //   → 复检间隔从 1s 拉到 2.5s，给图标渲染留出时间，多数情况第一轮就能翻案。
       //   ⚠ 按用户选择：不改判据本身（min:2 保持），只加长复检间隔 —— 改判据会影响所有任务。
-      homeConfirmGap: 0,    // 判「不是主界面」前的二次确认间隔(ms)
-                            //   0.5.87 起曾为 2500（防过渡帧误判），但实测这让
-                            //   goHome 的相邻两次点击间隔达 5s —— 用户口径
-                            //   （2026-09-21）：「2s 足够了」。改 0 = 立即复检一次
-                            //   （仍保留「复检」这道检测，只是不再白等）。
-                            //   过渡帧保护主要由 homeSettleMs=2000 承担。
+      homeConfirmGap: 700,  // 判「不是主界面」前的二次确认间隔(ms)
+                            //   0.5.87 起曾为 2500（防过渡帧误判）；后按用户口径
+                            //   （2026-09-21）「2s 足够了」改成 0 = 立即复检一次。
+                            //   ⚠ v0.6.57 改回 700：实测 0 会让复检**完全失效** ——
+                            //   两次 detect 各自 capture(true)，相隔仅几毫秒，
+                            //   拿到的是同一帧过渡画面 → 同判同错，
+                            //   于是每个任务开头/结尾都稳定报「未能确认回到主界面」。
+                            //   700ms 足以跳过页面切换动画，且远小于原先的 2500。
       homeSettleMs: 2000,   // 每按一次「返回」后等动画走完(ms)：防叠加多按
       backSpots: [          // 盲按返回候选位，按序轮转
         [1146, 69], [66, 677], [1229, 36], [40, 40], [66, 40], [640, 690],
@@ -375,10 +377,12 @@
         const nv = merged.nav || (merged.nav = {});
         if (!(nv.homeTimeout >= 30000)) nv.homeTimeout = 30000;
         // 0.5.87：下限 1000 → 2500（同上，给主界面图标渲染留时间，治首次 home() 来回跳 42s）
-        // v0.6.04：用户口径「两次点击之间 2s 足够了」→ 复检间隔回归 0，
-        //   靠 homeSettleMs=2000 承担过渡帧保护（实测点击间隔 5s → 2s）。
-        //   ⚠ 这里必须一并改：旧下限 2500 会把用户配置里的小值强行抬回去。
-        if (!(nv.homeConfirmGap >= 0) || nv.homeConfirmGap > 200) nv.homeConfirmGap = 0;
+        // v0.6.04：用户口径「两次点击之间 2s 足够了」→ 复检间隔曾回归 0。
+        // ★ v0.6.57：实测 0 让复检彻底失效（两次 detect 相隔几毫秒、同帧同判），
+        //   导致每个任务开头/结尾都报「未能确认回到主界面」。
+        //   下限改 500：既保证复检真的跨过一帧过渡动画，又远小于原来被否掉的 2500。
+        //   ⚠ 这里必须一并改：旧上限 200 会把用户配置强行压回 0。
+        if (!(nv.homeConfirmGap >= 500) || nv.homeConfirmGap > 3000) nv.homeConfirmGap = 700;
         if (!(nv.homeSettleMs >= 1500)) nv.homeSettleMs = 2000;
       } catch (e) { /* 迁移失败不影响加载 */ }
 
@@ -3701,7 +3705,15 @@ async function dragScene(ctx, dir) {
       //   注：confirmGap=0 时「二次确认」退化为**立即复检一次**（代码结构不变），
       //   仍能抓住「同一帧内判错」，只是不再等 2.5s。过渡帧保护由 settleMs=2000 承担。
       const settleMs = this.config.num('nav.homeSettleMs') || 2000;
-      const confirmGap = this.config.num('nav.homeConfirmGap') ?? 0;
+      // ★ v0.6.57：复检间隔必须 > 0，否则「二次确认」是假的。
+      //   原值 0（L253 默认 + L381 校验器强制回 0）→ 两次 detect 相隔几毫秒、
+      //   各自 capture 到**同一帧过渡画面**，必然得出同样的错误结论。
+      //   实跑日志：每个任务的开始/结束检查都稳定报「未能确认回到主界面（其它页）」，
+      //   而手动在同一主界面帧上复测，friendsIcon/mailNav 探针其实完全命中
+      //   （dF 3~34 / dM 1~32，均在 tol=60 内）—— 证明是**时序**问题，不是标定问题。
+      //   取 700ms：够跳过大多数页面切换动画，又不至于明显拖慢 goHome。
+      const CONFIRM_GAP_MIN = 700;
+      const confirmGap = Math.max(CONFIRM_GAP_MIN, this.config.num('nav.homeConfirmGap') ?? 0);
       const detectScene = () => {
         let sc = SCENE.UNKNOWN, rr = null;
         try { rr = this.scenes.detect(false); sc = rr.scene; }
@@ -3742,6 +3754,16 @@ async function dragScene(ctx, dir) {
           Utils.log('info', `    ↺ 复检确认已回主界面（首判=${SCENE_LABELS[firstScene] || firstScene}，` +
             `等 ${confirmGap}ms 后校正；避免了多按一次返回）`);
           this.stats.homeRecoveries++; return true;
+        }
+        // v0.6.57：复检也失败时记录两次判定的场景与关键探针，便于区分
+        //   「真的不在主界面」与「过渡帧」。
+        if (i === 0) {
+          const h = (r && r.hits) || {};
+          const pf = h.friendsIcon, pm = h.mailNav;
+          Utils.log('info', `    · 复检仍未判主界面（首判=${SCENE_LABELS[firstScene] || firstScene} → ` +
+            `复检=${SCENE_LABELS[scene] || scene}，等了 ${confirmGap}ms）` +
+            (pf ? ` friendsIcon d=${Math.round(pf.dist)}/${pf.tol}${pf.ok ? '✅' : '❌'}` : '') +
+            (pm ? ` mailNav d=${Math.round(pm.dist)}/${pm.tol}${pm.ok ? '✅' : '❌'}` : ''));
         }
         if (await this.tapExitConfirm('goHome 复检后')) {
           await Utils.sleep(settleMs);
@@ -4844,8 +4866,25 @@ async function dragScene(ctx, dir) {
     stepResult(ok) {
       const i = (this._flowIdx === undefined || this._flowIdx === null) ? -1 : this._flowIdx;
       if (i >= 0) FlowChart.result(i, ok);
+      // ★ v0.6.57：把「本步未达成」累计到当前任务，供 Runner 判定任务真实结果。
+      //   原先 stepResult 只画流程图配色，返回值无人消费 —— 于是任务里
+      //   「定位失败 → stepResult(false) → return」这种正常返回被 Runner 当成成功，
+      //   日志谎报「✓ 完成」。用户 2026-10-12 实测：排行榜点赞/免费招募/活跃度宝箱/
+      //   角斗场/特权商店五个任务全部报成功，实际一个都没做完。
+      //   用 Set 记步索引，便于 clearStepFail 精确撤销某一步（home() 用）。
+      if (!ok) { if (!this._stepFailSet) this._stepFailSet = new Set(); this._stepFailSet.add(i); }
+      else if (this._stepFailSet) this._stepFailSet.delete(i);
       return ok;
     }
+    /** 撤销当前步的失败标记（用于 home() 这类「导航降级不算任务未完成」的场景） */
+    clearStepFail() {
+      const i = (this._flowIdx === undefined || this._flowIdx === null) ? -1 : this._flowIdx;
+      if (this._stepFailSet) this._stepFailSet.delete(i);
+    }
+    /** 清空本任务的步骤失败计数（Runner 在任务开始/重试前调用） */
+    resetStepFails() { this._stepFailSet = new Set(); }
+    /** 读本任务累计的步骤失败数 */
+    get stepFails() { return this._stepFailSet ? this._stepFailSet.size : 0; }
     /** 内部：自动推进一步 */
     _advance(label) {
       if (this._flowIdx === undefined) return;   // 未启用流程图
@@ -4857,8 +4896,17 @@ async function dragScene(ctx, dir) {
     async go(c, wait, label) { return this.tap(c, wait || 'delay.pageLoad', label); }
     /** 清弹窗 */
     async popups() { return this.nav.dismissPopups(); }
-    /** 回主界面 */
-    async home() { this._advance(null); const r = await this.nav.goHome(); this.stepResult(!!r); return r; }
+    /** 回主界面。返回 true 表示确认回了主界面。
+     *  ★ v0.6.57：**不计入步骤失败**（见下方 clearStepFail 说明）。
+     *  goHome 失败只说明「回主界面这一下没确认成功」，属导航降级，
+     *  不代表任务本体没做完；实测 20 个任务里有 10 次这种告警，
+     *  若计为失败会把大量真正完成的任务误判为未完成。 */
+    async home() {
+      this._advance(null);
+      const r = await this.nav.goHome();
+      this.clearStepFail();   // ← 抵消本次 _advance 对应的失败位
+      return r;
+    }
     /** 打一场。opts.noHome=true 表示「一局打完不回主界面」，由任务自己处理续局（0.5.59） */
     async fight(opts) { this._advance(null); const r = await this.battle.run(opts || {}); this.stepResult(true); return r; }
     /** 等待场景 */
@@ -9408,6 +9456,33 @@ const MissionHall = {
 
           await this._runWithRetry(task);
 
+          // ★ v0.6.57：任务内的步骤失败必须降级为「未完成」。
+          //   任务用 `stepResult(false); return;` 表达「识别不到就跳过」，
+          //   这是**正常返回**，不会抛异常，原先一律记成 success（谎报完成）。
+          //   现在按实际步骤结果判定：有失败步骤 → 记 failed，理由带「未完成」，
+          //   便于用户一眼区分「跳过/没做到」与「抛异常崩了」，后续可重跑补完。
+          const sf = this.ctx.stepFails;
+          if (sf > 0) {
+            task.status = 'failed';
+            task.endTime = Date.now();
+            task.error = `未完成（${sf} 个步骤未达成）`;
+            this.history.push({ key: task.key, name: task.name, result: 'failed',
+              error: task.error, ms: task.endTime - task.startTime, partial: true });
+            this.progress.mark(task, 'failed', { error: task.error });
+            this.emit('taskFailed', { task, error: new Error(task.error) });
+            Utils.log('warn', `⚠ [${task.name}] 未完成（${sf} 个步骤未达成，用时 ` +
+              `${Utils.formatDuration(task.endTime - task.startTime)}）—— 已如实记为失败，可重跑`);
+            // 列出具体是哪些步未达成，便于直接定位是哪个识别/点击环节没做到
+            try {
+              const rs = (FlowChart && FlowChart.results) || [];
+              const names = (task.steps || []).map((s, i) => ({ i, t: s && (s.title || s) }))
+                .filter(x => rs[x.i] === 'fail').map(x => x.t);
+              if (names.length) Utils.log('warn', `    未达成步骤：${names.join(' / ')}`);
+            } catch (e) { /* 遥测失败不影响判定 */ }
+            try { await this.ctx.nav.goHome(); } catch (e) { /* 失败收尾不强求回主界面 */ }
+            continue;
+          }
+
           task.status = 'done';
           task.endTime = Date.now();
           this.history.push({ key: task.key, name: task.name, result: 'success', ms: task.endTime - task.startTime });
@@ -9468,6 +9543,7 @@ const MissionHall = {
         try {
           // 任务前先确保在主界面
           if (this.config.get('nav.requireHome')) await this.ctx.nav.ensureHome();
+          this.ctx.resetStepFails();          // ★ v0.6.57：每次尝试前清零步骤失败计数
           await Utils.withTimeout(task.run(this.ctx), timeout, task.name);
           return;
         } catch (err) {
