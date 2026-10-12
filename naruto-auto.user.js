@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.60
+// @version      0.6.62
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.60'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.62'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -4118,6 +4118,7 @@ async function dragScene(ctx, dir) {
       this._rbStallSince = 0;      // 最近一次「有任何战斗信号」的时间戳
       this._rbStallMs = 45000;     // 45s 无任何战斗信号 ⇒ 判定已不在战斗（慢速兜底）
       this._rbReadyAt = 0;         // 上次用「准备界面探针」探测的时间（6s 节流）
+      this._rbReadyTries = 0;      // 快速通道已探测次数（超上限即停，转慢速兜底）
 
       // ══ v0.6.43：独立高频结算探针 ══════════════════════════════════════════
       //  根因（2026-10-06 实测，用户口径「加快识别结算画面的频率才能根治」）：
@@ -4331,6 +4332,7 @@ async function dragScene(ctx, dir) {
               this._rbSeen = true;      // ★ 首次命中 ⇒ 确认「确实进过战斗」
               this._rbMissCnt = 0;
               this._rbStallSince = 0;   // ★ v0.6.59：有战斗信号 → 死锁计时归零
+              this._rbReadyTries = 0;   // ★ 快速通道预算也重置（下次停滞可重新探）
               if (!this._rbLogged) {
                 this._rbLogged = true;
                 Utils.log('info', `    ✓ 「第X回」在场（score=${rb.score}）→ 确认在战斗中，连点继续`);
@@ -4358,18 +4360,38 @@ async function dragScene(ctx, dir) {
                 //    它标定极干净（感叹号 正0/负≥22.98，红X 正0.3018/负≤0.2397），
                 //    远比其他判据可靠 ⇒ 一旦命中即**确知**已回到准备界面，立即松手，
                 //    不必再干等 45s。这是本保险的主路径。
-                if (stalled >= 6000 && nowMs - (this._rbReadyAt || 0) >= 6000) {
+                //
+                //  ⚠ 探测预算 1200ms 是**阻塞**在连点器主循环里的（本块位于
+                //    waitForEnd 的检测拍内）。为了不因反复探测拖慢正常战斗，
+                //    这里做两件事：① 用更短的 900ms 预算；② 快速通道连续失败
+                //    若干次后**停止探测**，退回慢速兜底 —— 说明画面既不是战斗
+                //    也不是准备界面（例如奖励面板还开着），继续探只是白等。
+                //    ⚠ waitArenaReady 定义在 **TaskContext**（不是 Navigator！），
+                //      只能经 ctx 调用。BattleFlow 内没有 ctx 引用，
+                //      故这里用 this.sawArenaReady() 自己跑同一套探针
+                //      （与 TaskContext.waitArenaReady 完全相同的两个判据）。
+                const RB_READY_PROBE_MS = 900;
+                const RB_READY_MAX_TRIES = 4;   // ≈24s 内探 4 次仍不中就放弃
+                if (stalled >= 6000
+                    && (this._rbReadyTries || 0) < RB_READY_MAX_TRIES
+                    && nowMs - (this._rbReadyAt || 0) >= 6000) {
                   this._rbReadyAt = nowMs;
+                  this._rbReadyTries = (this._rbReadyTries || 0) + 1;
                   let rdy = null;
-                  try { rdy = await this.nav.waitArenaReady(1200); } catch (e) { rdy = null; }
+                  try { rdy = await this.sawArenaReady(RB_READY_PROBE_MS); } catch (e) { rdy = null; }
                   if (rdy && rdy.ok) {
                     this.op && this.op.releaseHold && this.op.releaseHold();
                     Utils.log('warn', `    ⏱ 「第X回」已消失 ${Math.round(stalled / 1000)}s`
                       + `（阈值 ${ARENA_ROUND_THRESH} 不可达），但**准备界面探针命中**`
-                      + `（${rdy.why}）→ 确认已回到战斗准备界面，松开连点器（死锁保险 v0.6.59）`);
+                      + `（${rdy.why}）→ 确认已回到战斗准备界面，**立即松手续局**（死锁保险 v0.6.60）`);
                     this._rbLogged = false;
                     this._rbStallSince = 0;
+                    this._rbReadyTries = 0;
                     return 'round-gone';
+                  }
+                  if (this._rbReadyTries >= RB_READY_MAX_TRIES) {
+                    Utils.log('warn', `    · 准备界面探针连探 ${RB_READY_MAX_TRIES} 次未命中`
+                      + `（画面既非战斗亦非准备界面，可能在奖励面板）→ 停止探测，转慢速兜底`);
                   }
                 }
 
@@ -4452,6 +4474,8 @@ async function dragScene(ctx, dir) {
                   this._rbMissCnt = 0;
                   this._rbSeen = true;
                   this._rbLogged = false;   // 允许下次再打一次「在场」日志
+                  this._rbStallSince = 0;   // ★ v0.6.60：已确认回到战斗 → 死锁计时归零
+                  this._rbReadyTries = 0;   // ★ 快速通道预算重置
                   this._rbRecoverCount = (this._rbRecoverCount || 0) + 1;
                   // 恢复普攻按住态（等价于 combatStep 里的 _reassertHold，
                   //   但这里在 waitForEnd 作用域，拿不到那里的 holdAtk/P 局部量，
@@ -4609,6 +4633,64 @@ async function dragScene(ctx, dir) {
       }
     }
 
+    /** ★ v0.6.60：BattleFlow 版的「是否在战斗准备界面」探针。
+     *
+     *  为什么需要它：TaskContext.waitArenaReady() 定义在 **TaskContext** 类里
+     *  （见 class TaskContext 段），BattleFlow 拿不到 TaskContext 实例，
+     *  所以战斗主循环内无法直接调用它。而「连点器死锁保险」的快速通道
+     *  恰恰需要在**战斗循环内部**判断「是否已经回到准备界面」。
+     *  ⇒ 这里用与 TaskContext.waitArenaReady **完全相同**的两个判据复刻一份：
+     *      ① 规则说明左侧蓝色感叹号（模板）  score < ARENA_READY_ICON_THRESH
+     *      ② 右上角红叉的红色像素占比        red   >= ARENA_READY_X_RED_MIN
+     *  两者同时满足、且连续 need 拍命中才算（防抖）。
+     *
+     *  @param {number} budgetMs 预算；超时返回 ok:false
+     *  @returns {Promise<{ok:boolean, ms:number, why:string}>}
+     */
+    async sawArenaReady(budgetMs) {
+      const t0 = Date.now();
+      const budget = budgetMs || 900;
+      const need = 2;                       // 与 TaskContext 版一致：连续 2 拍
+      let hit = 0;
+      try { await loadArenaReadyIconTemplate(); } catch (e) {
+        return { ok: false, ms: 0, why: '模板加载失败: ' + e.message };
+      }
+      let lastIcon = Infinity, lastRed = 0;
+      while (Date.now() - t0 < budget) {
+        Runtime.check();
+        let icon = Infinity, red = 0;
+        try {
+          this.vision.capture(true);        // 与 detect 一致：用强制新帧
+          const tm = await loadArenaReadyIconTemplate();
+          const r1 = this.vision.findTemplate(tm, ARENA_READY_ICON_REGION,
+            { step: 1, thresh: ARENA_READY_ICON_THRESH });
+          icon = (r1 && r1.score !== undefined) ? r1.score : Infinity;
+        } catch (e) { icon = Infinity; }
+        try {
+          const [a1, b1, a2, b2] = ARENA_READY_X_REGION;
+          const d = this.vision.ctx.getImageData(a1, b1, a2 - a1, b2 - b1).data;
+          let n = 0, rr = 0;
+          for (let i = 0; i < d.length; i += 4) {
+            n++;
+            const R = d[i], G = d[i + 1], B = d[i + 2];
+            if (R > 130 && R > G + 60 && R > B + 60) rr++;
+          }
+          red = n > 0 ? rr / n : 0;
+        } catch (e) { red = 0; }
+        lastIcon = icon; lastRed = red;
+        const ok = icon < ARENA_READY_ICON_THRESH && red >= ARENA_READY_X_RED_MIN;
+        hit = ok ? hit + 1 : 0;
+        if (hit >= need) {
+          return { ok: true, ms: Date.now() - t0,
+            why: `感叹号 score=${icon.toFixed(1)} + 红X ${(red * 100).toFixed(0)}%` };
+        }
+        await Utils.sleep(ARENA_READY_POLL_MS);
+      }
+      return { ok: false, ms: Date.now() - t0,
+        why: `未命中（末次 感叹号 ${lastIcon === Infinity ? '∞' : lastIcon.toFixed(1)}`
+          + ` + 红X ${(lastRed * 100).toFixed(0)}%）` };
+    }
+
     /** 加载「第」字模板（只解析一次，之后缓存）——用于「在战斗中」判定。 */
     async loadRoundDiTemplate() {
       if (this._roundDiTmpl) return this._roundDiTmpl;
@@ -4666,6 +4748,30 @@ async function dragScene(ctx, dir) {
 
       for (let i = 0; i < rounds; i++) {
         Runtime.check();
+
+        // ★ v0.6.62：「对手离开游戏」弹窗拦截（用户 2026-10-12 实测）。
+        //  现象：忍术对战开局对手秒退，画面弹出正中金色【确定】
+        //    「你的对手离开了游戏，你获得胜利」。
+        //  该弹窗没有任何 SCENE 探针覆盖（28 个探针全 miss，scene=other，
+        //  brightness=48 非 LOADING），于是战斗循环继续盲按连点器，
+        //  最终把奖励界面当成战斗界面乱点。
+        //
+        //  ⚠ 关键：这个判据**早就有**（SECRET_REALM_EXIT_CONFIRM_*，v0.6.04
+        //    为秘境做的），但只接在 goHome() 里；角斗场战斗循环从不调用
+        //    goHome ⇒ 弹窗无人处理。此处把它接进战斗循环。
+        //  实测该弹窗读数：goldPct=0.829（阈 0.5）、dist=92（阈 120）、
+        //  遮罩 5/5 ⇒ 分离干净，可直接复用，无需重标定。
+        const xc = this.nav.detectExitConfirm();
+        if (xc && xc.ok) {
+          Utils.log('info', `    ✓ 检测到「对手离开/退出确认」金色【确定】`
+            + `（金色占比=${xc.goldPct} 色距=${xc.dist} 遮罩=${xc.dimOk ? '是' : '否'}）`
+            + ` → 点击 (${SECRET_REALM_EXIT_CONFIRM_CLICK[0]},${SECRET_REALM_EXIT_CONFIRM_CLICK[1]})`);
+          this.op && this.op.releaseHold && this.op.releaseHold();   // 先松手再点，防连点器抢点
+          await this.op.tap(SECRET_REALM_EXIT_CONFIRM_CLICK[0],
+            SECRET_REALM_EXIT_CONFIRM_CLICK[1], 'delay.short');
+          await Utils.sleep(1200);
+          continue;
+        }
 
         const r = this.scenes.detect(false);
 
