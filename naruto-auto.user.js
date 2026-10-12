@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.58
+// @version      0.6.59
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.58'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.59'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -4089,6 +4089,26 @@ async function dragScene(ctx, dir) {
       //   _rbRecoverCount：v0.6.42 本场「误判离场后恢复连点」的次数（诊断用）
       this._rbMissCnt = 0; this._rbLogged = false; this._rbRecoverCount = 0;
       this._rbSeen = false; this._rbWaitLogged = false;
+      // ══ v0.6.59：连点器「死锁保险」（用户 2026-10-12 实测触发）══════════════
+      //  现象：忍术对战第 1 局对手离开后，脚本在奖励界面/准备界面上**继续狂按
+      //    连点器 76 秒**（10:42:11→10:43:27），技能键三连每 5s 一轮稳定得像心跳。
+      //  根因链（三个各自合理的决定叠成死锁）：
+      //    ① ARENA_ROUND_THRESH 被放宽到 90（防误停），高到战斗中真实读数
+      //       （实测 36.7~68）根本够不到 ⇒ 该探针恒判「不在场」；
+      //    ② 唯一松手开关是 `_rbMissCnt >= 4`，而 miss 由「score > 90」定义
+      //       ⇒ 计数永远是 0 ⇒ 永不松手；
+      //    ③ 注释假设「由结算图标兜底收手」，但该局结算图标全程 46.5~52.4
+      //       （阈 30）也从未命中 ⇒ 兜底不存在。
+      //  ⇒ 结果：一旦 _rbSeen 置位，所有「离开战斗」判据同时失效，连点器锁死。
+      //
+      //  保险设计（不碰任何探针阈值，纯时间兜底）：
+      //    本场已确认进过战斗(_rbSeen) 且 连续 STALL_MS 内**既没有**结算图标命中、
+      //    **也没有**「第X回」命中 ⇒ 判定「已不在战斗」→ 强制松手并落判 round-gone。
+      //    「画面静止」不作为必需条件：本 case 里技能键点击本身让画面一直微动。
+      //  ⚠ 阈值取 45s：远大于正常单局时长波动，正常打不会误触发；
+      //    真误触发也只是提前松手，由 playOneArenaRound 的 waitArenaReady 接住续局。
+      this._rbStallSince = 0;      // 最近一次「有任何战斗信号」的时间戳
+      this._rbStallMs = 45000;     // 45s 无任何战斗信号 ⇒ 判定已不在战斗
 
       // ══ v0.6.43：独立高频结算探针 ══════════════════════════════════════════
       //  根因（2026-10-06 实测，用户口径「加快识别结算画面的频率才能根治」）：
@@ -4301,6 +4321,7 @@ async function dragScene(ctx, dir) {
             if (rb.ok) {
               this._rbSeen = true;      // ★ 首次命中 ⇒ 确认「确实进过战斗」
               this._rbMissCnt = 0;
+              this._rbStallSince = 0;   // ★ v0.6.59：有战斗信号 → 死锁计时归零
               if (!this._rbLogged) {
                 this._rbLogged = true;
                 Utils.log('info', `    ✓ 「第X回」在场（score=${rb.score}）→ 确认在战斗中，连点继续`);
@@ -4315,6 +4336,25 @@ async function dragScene(ctx, dir) {
               }
             } else {
               this._rbMissCnt = (this._rbMissCnt || 0) + 1;
+
+              // ★ v0.6.59：死锁保险 —— 「第X回」不可达时，用时间兜底强制松手。
+              //   见 waitForEnd 开局处注释：阈值 90 让 _rbMissCnt 永远到不了 4，
+              //   连点器会锁死。这里不依赖该阈值，只看「多久没有任何战斗信号」。
+              if (this._rbSeen) {
+                const nowMs = Date.now();
+                if (!this._rbStallSince) this._rbStallSince = nowMs;
+                const stalled = nowMs - this._rbStallSince;
+                if (stalled >= this._rbStallMs) {
+                  this.op && this.op.releaseHold && this.op.releaseHold();
+                  Utils.log('warn', `    ⏱ 连续 ${Math.round(stalled / 1000)}s 无任何战斗信号`
+                    + `（「第X回」阈值 ${ARENA_ROUND_THRESH} 不可达、结算图标亦未命中）`
+                    + `→ **强制松开连点器**，判定已离开战斗（死锁保险 v0.6.59）`);
+                  this._rbLogged = false;
+                  this._rbStallSince = 0;
+                  return 'round-gone';
+                }
+              }
+
               // ⚠ v0.6.40：2 → 4（≈4s）。原为 2 次（≈2s），2026-10-04 实跑证明
               //   探针分数抖动时 2 秒就能凑够 2 次 miss → 战斗中途误判「已离开战斗」。
               //   放宽到 4 次：过场/换小局/抖动都能扛住；真离开也有 4 秒内落判。
@@ -8950,11 +8990,38 @@ const MissionHall = {
               Utils.log('info', `🎁 [${tag}] 复检仍未领满 → 稍后再打一批`);
             }
           }
-          // ★ 无论领满与否，都必须点最右回到战斗准备界面（用户口径）
+          // ★ v0.6.59：退出奖励面板必须**验证 + 重试**。
+          //  用户 2026-10-12 实测：第一次进场领完奖励后脚本在奖励界面/准备界面
+          //  直接开始连点器（连点器把奖励界面当成战斗画面乱按）。
+          //  旧写法只 clickNatural 一次 ARENA_REWARD_EXIT=[1245,320] 就 return
+          //  {opened:true}，**从不检查是否真的退出去了** —— 点空了也照样往下走，
+          //  后面 waitArenaReady 才发现不在准备界面，但连点器已经开按。
           Utils.log('info', `🎁 [${tag}] 点最右 → 回战斗准备界面`);
-          await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1], null, '返回忍术对战界面');
-          await Utils.sleep(1800);
-          return { opened: true, done: st.done };
+          let exited = false;
+          for (let att = 1; att <= 3 && !exited; att++) {
+            await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1],
+              null, att === 1 ? '返回忍术对战界面' : `返回忍术对战界面(第${att}次)`);
+            await Utils.sleep(1500);
+            // 面板已退出的判据：能看到「战斗准备界面」的两枚锚点
+            const rr = await ctx.waitArenaReady(3000);
+            if (rr.ok) { exited = true; break; }
+            // 面板还在 ⇒ 补一记右上角红叉位（有些布局下面板只有红叉能关）
+            if (att < 3) {
+              Utils.log('warn', `    ⚠ 第 ${att} 次点「最右」后仍未回到准备界面 → 补点红叉位重试`);
+              await ctx.op.clickNatural(ARENA_REWARD_EXIT[0], ARENA_REWARD_EXIT[1],
+                null, '返回忍术对战界面(重试)');
+              await Utils.sleep(1200);
+              const rr2 = await ctx.waitArenaReady(3000);
+              if (rr2.ok) { exited = true; break; }
+            }
+          }
+          if (exited) {
+            Utils.log('info', `🎁 [${tag}] ✓ 已确认退出奖励面板 → 回到战斗准备界面`);
+          } else {
+            Utils.log('warn', `🎁 [${tag}] ⚠ 点了 3 次仍未确认退出奖励面板`
+              + ` → 标记未退出，交给本批循环自检（不在此处继续盲点）`);
+          }
+          return { opened: true, done: st.done, exited: exited };
         };
 
         // ★ v0.6.27 首次进场先查「今天是否已领完」（用户口径）：
@@ -8979,6 +9046,17 @@ const MissionHall = {
           Utils.log('info', '🎁 ✓ 今天忍术奖励已全部领完 → 跳过战斗，直接回桌面');
           ctx.step('今日已完成，跳过战斗'); ctx.stepResult(true);
           // ⚠ 不调 clearSettlement()（见文件末尾同一处说明：非结算页会空转 8 秒）
+          await ctx.home();
+          return;
+        }
+        // ★ v0.6.59：奖励面板没确认退出 ⇒ **绝不进入战斗循环**。
+        //  用户 2026-10-12 实测：正是在这里——面板没退出去，脚本却
+        //  「正常进入战斗流程」→ 连点器直接在奖励界面上开按。
+        //  连点器的技能/普攻坐标落在奖励界面上会乱点（可能误入战斗）。
+        if (!peek.exited) {
+          Utils.log('warn', '🎁 ⚠ 首次进场领完奖励后未能确认退出面板'
+            + ' → 回主界面重新完整执行本任务（不在奖励界面上开连点器）');
+          ctx.step('奖励面板未退出，中止本任务'); ctx.stepResult(false);
           await ctx.home();
           return;
         }
