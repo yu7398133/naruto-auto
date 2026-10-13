@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.63
+// @version      0.6.64
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.63'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.64'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1861,6 +1861,31 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
       const first = this.sawArenaRewardClaimed(0);
       const second = this.sawArenaRewardClaimed(1);
       return { done: first.ok && second.ok, first, second };
+    }
+
+    /** ★ v0.6.64：奖励面板「四周变暗」判据的**原始读数**（不判定，只回报）。
+     *
+     *  与 sawArenaRewardPanel() 的区别：那个返回 ok（过没过阈值），
+     *  这个返回 5 块的亮度数组 —— **失败现场的日志要靠它说清"为什么没过"**。
+     *  实测 2026-10-13：战斗准备界面上恒定读到 100/91/55/30/79（暗块 3/5），
+     *  而真正的奖励面板是 5/5；光看 ok=false 分不出这两种情况。 */
+    sawArenaRewardPanelRaw() {
+      this._fresh();
+      const lumas = [];
+      try {
+        for (const a of ARENA_PANEL_DIM_AREAS) {
+          const w = a[2] - a[0], h = a[3] - a[1];
+          const d = this.ctx.getImageData(a[0], a[1], w, h).data;
+          let s = 0, n = 0;
+          for (let i = 0; i < d.length; i += 4) { s += (d[i] * 77 + d[i + 1] * 151 + d[i + 2] * 28) >> 8; n++; }
+          lumas.push(Math.round(s / n));
+        }
+      } catch (e) {
+        return { ok: false, dark: 0, total: ARENA_PANEL_DIM_AREAS.length, lumas, err: e.message };
+      }
+      let dark = 0;
+      for (const l of lumas) if (l <= ARENA_PANEL_DIM_LUMA_MAX) dark++;
+      return { ok: dark >= ARENA_PANEL_DIM_NEED, dark, total: ARENA_PANEL_DIM_AREAS.length, lumas };
     }
 
     /**
@@ -5110,7 +5135,14 @@ async function dragScene(ctx, dir) {
       //   日志谎报「✓ 完成」。用户 2026-10-12 实测：排行榜点赞/免费招募/活跃度宝箱/
       //   角斗场/特权商店五个任务全部报成功，实际一个都没做完。
       //   用 Set 记步索引，便于 clearStepFail 精确撤销某一步（home() 用）。
-      if (!ok) { if (!this._stepFailSet) this._stepFailSet = new Set(); this._stepFailSet.add(i); }
+      if (!ok) {
+        if (!this._stepFailSet) this._stepFailSet = new Set();
+        this._stepFailSet.add(i);
+        // ★ v0.6.64：失败当场抓现场（探针读数 + 截图），供事后定位。
+        //   此前的教训：日志只说「没做到」，不说「当时屏幕长什么样」，
+        //   于是每次都得回头找你截图、靠猜（如 忍术奖励面板 3/5 那次的误判）。
+        this.captureFailure(i);
+      }
       else if (this._stepFailSet) this._stepFailSet.delete(i);
       return ok;
     }
@@ -5119,6 +5151,125 @@ async function dragScene(ctx, dir) {
       const i = (this._flowIdx === undefined || this._flowIdx === null) ? -1 : this._flowIdx;
       if (this._stepFailSet) this._stepFailSet.delete(i);
     }
+    /**
+     * ★ v0.6.64：失败当场抓现场。
+     *
+     * 为什么需要（本项目的真实教训）：
+     *   日志长期只说「⚠ 奖励面板没打开」，不说**当时屏幕到底是什么**。
+     *   于是每次定位都要反过来找用户要截图、或者靠猜阈值 —— 2026-10-13 那次
+     *   「奖励面板 3/5」就被误诊为「动画没跑完、读得太早」，而两轮日志
+     *   读数几乎逐位相同（102/90/55/30/79 vs 100/91/55/30/79）说明
+     *   **它根本不是慢，是那个画面上判据恒为 3/5**。误诊直接写进了代码注释，
+     *   顺着错误结论把「判据不动」也钉死了。
+     *   ⇒ 现场证据必须在失败的那一刻自动留下来，不能靠事后回忆。
+     *
+     * 抓三样（都由脚本自己完成，用户零操作）：
+     *   ① 场景探针全量读数（哪个探针命中/距离多少）→ 知道"这是哪个界面"
+     *   ② 亮度 + 各采样区读数 → 知道"判据为什么没满足"
+     *   ③ 一张截图（video 全尺寸 PNG）→ 知道"屏幕上到底长什么样"
+     *
+     * 去重：同一步 + 同一场景 只抓第一次（否则轮询类失败会刷出几十张图）。
+     * 上限：单任务最多 6 次（含不同步骤），防止异常时写爆磁盘。
+     *
+     * @param {number} stepIdx 步骤索引（-1 = 无流程图上下文）
+     */
+    captureFailure(stepIdx) {
+      try {
+        if (!this._failShots) { this._failShots = []; }
+        if (this._failShots.length >= 6) return;
+
+        // ① 场景探针全量读数
+        //   ⚠ hits 是 {probeKey: {ok, dist, ...}} 的**对象**，不是数组（v0.6.64 修正）
+        let scene = 'unknown', brightness = -1, hits = [];
+        try {
+          const r = this.scenes.detect(false);
+          scene = r.scene; brightness = r.brightness;
+          const hm = r.hits || {};
+          hits = Object.keys(hm).filter(k => hm[k] && hm[k].ok)
+            .map(k => `${k}=${hm[k].dist == null ? '?' : Math.round(hm[k].dist)}`);
+        } catch (e) { /* 探针异常不影响抓图 */ }
+
+        // 去重键：同一步 + 同一场景 只抓一次
+        const key = `${stepIdx}|${scene}`;
+        if (this._failShotKeys && this._failShotKeys.has(key)) return;
+        if (!this._failShotKeys) this._failShotKeys = new Set();
+        this._failShotKeys.add(key);
+
+        // 步骤名
+        let stepName = '(无)';
+        try {
+          const st = ((FlowChart && FlowChart.steps) || [])[stepIdx];
+          if (st) stepName = st.title || st;
+        } catch (e) { /* ignore */ }
+
+        const seq = this._failShots.length + 1;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const head = `❌ 失败现场 #${seq} 步骤=${stepName}`;
+        Utils.log('warn', `${head}`);
+        Utils.log('warn', `     场景=${scene} 亮度=${typeof brightness === 'number' ? brightness.toFixed(1) : brightness}` +
+          ` 命中探针=[${hits.length ? hits.join(' ') : '无'}]`);
+
+        // ② 亮度采样区（奖励面板判据是当前最可疑的一处，顺手记下来）
+        let lumas = null;
+        try {
+          if (this.vision && typeof this.vision.sawArenaRewardPanelRaw === 'function') {
+            const raw = this.vision.sawArenaRewardPanelRaw();
+            lumas = raw.lumas;
+            Utils.log('warn', `     奖励面板判据：暗块 ${raw.dark}/${raw.total}` +
+              ` 亮度[${raw.lumas.join('/')}]（需 ≥${ARENA_PANEL_DIM_NEED} 块 ≤${ARENA_PANEL_DIM_LUMA_MAX}）`);
+          }
+        } catch (e) { /* ignore */ }
+
+        const rec = { seq, stepIdx, stepName, scene, brightness, hits, lumas, at: Date.now() };
+        this._failShots.push(rec);
+
+        // ③ 截图（video 全尺寸）
+        this._grabShot(ts, seq, head);
+      } catch (e) {
+        try { Utils.log('warn', `     ⚠ 失败现场抓取异常：${e.message}`); } catch (_) { /* ignore */ }
+      }
+    }
+
+    /** 截图存盘（尽力而为：拿不到 video 只记日志，不抛）
+     *
+     *  ★ v0.6.64：图片**只落盘、不写进日志**。
+     *    用户口径：「截图直接放桌面之类的地方，日志只记录放哪儿了就行，
+     *    这样日志也不至于过大」。
+     *    机制：与日志导出同一个 `a.download` → 走浏览器下载目录。
+     *    本机实测该目录 = 桌面（桌面已有 naruto-log-*.txt，Downloads 里没有）。
+     *    ⚠ 脚本无法指定绝对路径（@grant none，没有 GM_download），
+     *      日志因此只记**文件名**，并提示去下载目录找。
+     */
+    _grabShot(ts, seq, head) {
+      try {
+        const video = document.querySelector('video');
+        if (!video || !video.videoWidth) {
+          Utils.log('warn', `     📷 截图跳过（video 未就绪）`);
+          return null;
+        }
+        const c = document.createElement('canvas');
+        c.width = video.videoWidth; c.height = video.videoHeight;
+        c.getContext('2d').drawImage(video, 0, 0);
+        // 文件名前缀固定 naruto-fail-，便于在下载目录里一眼找到/批量删除
+        const fname = `naruto-fail-${ts}-#${seq}.png`;
+        const a = document.createElement('a');
+        a.href = c.toDataURL('image/png');
+        a.download = fname;
+        a.click();
+        this._failShotFiles = this._failShotFiles || [];
+        this._failShotFiles.push(fname);
+        // 日志只记「放哪儿了」，不含图片数据
+        Utils.log('warn', `     📷 截图已存：${fname}（${c.width}x${c.height}，在浏览器下载目录/桌面）`);
+        return fname;
+      } catch (e) {
+        Utils.log('warn', `     📷 截图异常：${e.message}`);
+        return null;
+      }
+    }
+    /** 读本任务累计的失败现场（Runner 收尾时打印） */
+    get failureShots() { return this._failShots || []; }
+    /** 清空失败现场（Runner 每次尝试前调用） */
+    resetFailureShots() { this._failShots = []; this._failShotKeys = new Set(); this._failShotFiles = []; }
     /** 清空本任务的步骤失败计数（Runner 在任务开始/重试前调用） */
     resetStepFails() { this._stepFailSet = new Set(); }
     /** 读本任务累计的步骤失败数 */
@@ -9757,6 +9908,10 @@ const MissionHall = {
                 .filter(x => rs[x.i] === 'fail').map(x => x.t);
               if (names.length) Utils.log('warn', `    未达成步骤：${names.join(' / ')}`);
             } catch (e) { /* 遥测失败不影响判定 */ }
+            // ★ v0.6.64：失败时打印「诊断摘要」——把当场抓到的现场汇总成
+            //   一段可直接定位问题的话，而不是只列步骤名。
+            //   设计目标：**光看日志就能复现问题**，不必回头找用户要截图。
+            this._dumpFailureDigest(task);
             try { await this.ctx.nav.goHome(); } catch (e) { /* 失败收尾不强求回主界面 */ }
             continue;
           }
@@ -9777,6 +9932,9 @@ const MissionHall = {
 
           if (err instanceof AbortError) { Utils.log('warn', `⏹ [${task.name}] 已中止`); break; }
           Utils.log('error', `✗ [${task.name}] 失败: ${task.error}`);
+          // ★ v0.6.64：异常路径也抓现场 —— 崩在这里时画面多半就是问题所在
+          //   （历史教训：角斗场崩在「奖励面板已打开」，但没人知道那画面长什么样）
+          try { this.ctx.captureFailure(-1); this._dumpFailureDigest(task); } catch (e) { /* 遥测失败不影响收尾 */ }
 
           // 失败后强制回主界面，避免带错误状态进下一个任务。
           // ⚠ v0.6.28：**不再静默吞异常**。上一版是 `catch(e){/* ignore */}` ——
@@ -9810,6 +9968,55 @@ const MissionHall = {
       Utils.log('info', `🏁 全部结束：成功 ${success}，失败 ${failed}，用时 ${Utils.formatDuration(Date.now() - this.startedAt)}`);
     }
 
+    /**
+     * ★ v0.6.64：打印失败诊断摘要。
+     *
+     * 目的：把「未完成」从一句笼统的结论，变成**可独立定位的现场记录**。
+     *   旧日志只到 `未达成步骤：免费招募 / 点「确定」 / 回主界面` 就结束了 ——
+     *   知道哪步没做到，但不知道**当时画面是什么、探针读到什么**，
+     *   于是每次都要回头找用户要截图、或者凭阈值猜（并因此误诊过）。
+     *
+     * 输出三段：
+     *   ① 步骤级：哪些步未达成（原有能力，保留）
+     *   ② 现场级：每次失败的场景/亮度/命中探针/奖励面板亮度读数
+     *   ③ 落盘级：截图文件名清单 —— 用户导出日志时一并带走
+     */
+    _dumpFailureDigest(task) {
+      try {
+        Utils.log('warn', `  ┌─ 诊断摘要 [${task.name}] ${'─'.repeat(30)}`);
+        // ① 步骤级
+        const rs = (FlowChart && FlowChart.results) || [];
+        const failed = (task.steps || []).map((s, i) => ({ i, t: s && (s.title || s) }))
+          .filter(x => rs[x.i] === 'fail');
+        if (failed.length) {
+          Utils.log('warn', `  │ 未达成步骤(${failed.length})：${failed.map(x => x.t).join(' / ')}`);
+        }
+        // ② 现场级
+        const shots = this.ctx.failureShots || [];
+        if (!shots.length) {
+          Utils.log('warn', `  │ 无失败现场记录（本任务未走到 stepResult(false)，或抓取被跳过）`);
+        } else {
+          Utils.log('warn', `  │ 失败现场 ${shots.length} 处（按发生顺序）：`);
+          for (const s of shots) {
+            Utils.log('warn', `  │   #${s.seq} 步骤「${s.stepName}」 场景=${s.scene} 亮度=${s.brightness}`);
+            Utils.log('warn', `  │        命中探针=[${s.hits && s.hits.length ? s.hits.join(' ') : '无'}]` +
+              (s.lumas ? ` 奖励面板亮度=[${s.lumas.join('/')}]` : ''));
+          }
+        }
+        // ③ 落盘级 —— 只记文件名，不含图片数据（日志体积不受截图影响）
+        const files = this.ctx._failShotFiles || [];
+        if (files.length) {
+          Utils.log('warn', `  │ 截图(${files.length}) 已存到「浏览器下载目录」= 桌面：`);
+          for (const f of files) Utils.log('warn', `  │   ${f}`);
+        } else {
+          Utils.log('warn', `  │ 截图：无（video 未就绪或未走到抓图分支）`);
+        }
+        Utils.log('warn', `  └${'─'.repeat(48)}`);
+      } catch (e) {
+        Utils.log('warn', `  诊断摘要生成异常：${e.message}`);
+      }
+    }
+
     async _runWithRetry(task) {
       const max = this.config.num('retry.maxAttempts') || 2;
       const interval = this.config.num('retry.interval') || 2500;
@@ -9824,6 +10031,9 @@ const MissionHall = {
         const epoch = Runtime.newEpoch();
         this.ctx.epoch = epoch;
         task.epoch = epoch;
+        // ★ v0.6.64：现场清零必须放在 ensureHome **之前** ——
+        //   ensureHome 自己也可能失败，那正是最该留证据的一次。
+        this.ctx.resetFailureShots();
         try {
           // 任务前先确保在主界面
           if (this.config.get('nav.requireHome')) await this.ctx.nav.ensureHome();
@@ -11360,8 +11570,25 @@ const MissionHall = {
 
     /** 导出全部日志为 .txt（可只贴出问题那一段） */
     downloadLogs() {
+      // ★ v0.6.64：把「失败现场」摘要写进日志头部 —— 导出这一个文件就带齐证据，
+      //   不必再去翻截图文件名或回忆当时屏幕状态。
+      let diag = '';
+      try {
+        const shots = (this.app && this.app.scheduler && this.app.scheduler.ctx
+          && this.app.scheduler.ctx.failureShots) || [];
+        const files = (this.app && this.app.scheduler && this.app.scheduler.ctx
+          && this.app.scheduler.ctx._failShotFiles) || [];
+        if (shots.length || files.length) {
+          diag = '失败现场（最近一次任务）：\n' +
+            shots.map(s => `  #${s.seq} 步骤「${s.stepName}」 场景=${s.scene} 亮度=${s.brightness}` +
+              ` 命中探针=[${s.hits && s.hits.length ? s.hits.join(' ') : '无'}]` +
+              (s.lumas ? ` 奖励面板亮度=[${s.lumas.join('/')}]` : '')).join('\n') + '\n' +
+            `  截图(${files.length})（在浏览器下载目录/桌面，按文件名找）：\n` +
+            files.map(f => `    ${f}`).join('\n') + '\n' + `${'─'.repeat(60)}\n`;
+        }
+      } catch (e) { /* 诊断信息尽力而为，不影响日志导出 */ }
       const head = `火影自动化 v${VERSION} 日志\n导出时间: ${new Date().toLocaleString('zh-CN')}\n共 ${this.logs.length} 条\n` +
-        `${'─'.repeat(60)}\n`;
+        `${'─'.repeat(60)}\n` + diag;
       const body = this.logs.join('\n');
       const blob = new Blob([head + body], { type: 'text/plain;charset=utf-8' });
       const a = document.createElement('a');
