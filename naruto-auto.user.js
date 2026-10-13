@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.62
+// @version      0.6.63
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.62'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.63'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -46,7 +46,61 @@
       this._listeners.forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
     },
     reset() { this.aborted = false; },
-    check() { if (this.aborted) throw new AbortError(); }
+    check() { if (this.aborted) throw new AbortError(); },
+
+    // ── ★ v0.6.63：任务代次（epoch）—— 超时任务的「僵尸」问题 ──────────────
+    //  根因：_runWithRetry 用 Utils.withTimeout(task.run(ctx), timeout) 包任务，
+    //    而 withTimeout 是 `Promise.race([task, 超时])` —— **超时只结束「等待」，
+    //    并不会取消输的那一方**。task.run(ctx) 的 promise 仍在后台继续跑，
+    //    还在调 ctx.go()/replaySeq()/ctx.home()，**照样往同一个画面点**。
+    //
+    //  实测证据（2026-10-13 日志，秘境挑战 timeout=600000ms）：
+    //    秘境探不到准备界面 → 每 ~88s 一轮「回主界面 → 重导航」，10 分钟后
+    //    被 withTimeout 判超时、调度器 continue 去跑下一个任务，但秘境 run()
+    //    没死：10:37:47 / 10:38:47 的「⚠ 未探测到秘境准备界面图标」还插在
+    //    **特权商店/免费招募/角斗场**的日志中间 —— 它一边 ctx.home() 回主界面、
+    //    一边把画面拖到最右去点秘境入口，把前台任务正在操作的画面整个冲掉。
+    //    受害者：免费招募（普通招募页签 3 次定位失败）、角斗场忍术对战
+    //    （奖励一个没领到 + 奖励面板退不出去）。
+    //
+    //  判据设计：代次是**单调递增**的整数。调度器每跑一个任务前 newEpoch()
+    //    拿到自己的代次；任务结束（正常/异常/超时）时 retireEpoch() 把它作废。
+    //    任何「会操作画面」的动作前调 assertEpoch()：自己已不是当前代次
+    //    ⇒ 立刻抛 AbortError 停手。
+    //
+    //  ⚠ 为什么用「作废」而不是「比较大小」：任务可能重试（同一任务多代次），
+    //    也可能并发（未来若改并发调度），比较大小会误伤；只有「我被明确作废了」
+    //    才是可靠信号。
+    //  ⚠ 默认值 0 表示「不属于任何代次」（例如脚本启动前的调试调用）
+    //    ⇒ assertEpoch 对 0 放行，避免把非任务上下文的调用也拦掉。
+    nextEpoch: 1,
+    currentEpoch: 0,
+    _deadEpochs: new Set(),
+    newEpoch() {
+      const e = this.nextEpoch++;
+      this.currentEpoch = e;
+      this._deadEpochs.delete(e);
+      return e;
+    },
+    /** 作废一个代次（任务已结束/超时/被放弃） */
+    retireEpoch(e) {
+      if (!e) return;
+      this._deadEpochs.add(e);
+      // 防无界增长：老代次没有引用方了，留最近 200 个足够诊断
+      if (this._deadEpochs.size > 200) {
+        const arr = [...this._deadEpochs].sort((a, b) => a - b);
+        for (let i = 0; i < arr.length - 200; i++) this._deadEpochs.delete(arr[i]);
+      }
+    },
+    isEpochDead(e) { return !!e && this._deadEpochs.has(e); },
+    /** 画面操作前的闸门：本代次已作废 ⇒ 抛 AbortError 停手（不是静默 return！） */
+    assertEpoch(e, what) {
+      if (!e) return;                     // 非任务上下文（调试/启动前）放行
+      if (this._deadEpochs.has(e)) {
+        throw new AbortError(`任务已结束/超时（代次 ${e} 作废），停止操作画面` +
+          (what ? `：${what}` : ''));
+      }
+    }
   };
 
   // ============================================================
@@ -4897,12 +4951,18 @@ async function dragScene(ctx, dir) {
     constructor(op, cfg, nav, scenes, battle, progress, vision) {
       this.op = op; this.cfg = cfg; this.nav = nav; this.scenes = scenes;
       this.battle = battle; this.progress = progress; this.vision = vision;
+      // ★ v0.6.63：本任务所属代次（由 Runner 在每次尝试前写入）。
+      //   0 = 非任务上下文（调试/启动前）⇒ 闸门放行。
+      this.epoch = 0;
     }
+    /** ★ v0.6.63：画面操作闸门。任务被超时/结束作废后，僵尸代码在这一步停住。 */
+    _epochGate(what) { Runtime.assertEpoch(this.epoch, what); }
     /** 点击坐标点 {x,y} 或 [x,y] */
     async tap(c, wait, label) {
       const x = Array.isArray(c) ? c[0] : c.x;
       const y = Array.isArray(c) ? c[1] : c.y;
       const l = label || this._nameRef(c);
+      this._epochGate(`点击(${x},${y})「${l}」`);
       this._advance(l);                 // 流程图推进（若已 flow()）
       await this.op.clickNatural(x, y, null, l);
       this.lastTapLabel = l;
@@ -4949,6 +5009,7 @@ async function dragScene(ctx, dir) {
         x2 = Array.isArray(b) ? b[0] : (b && b.x); y2 = Array.isArray(b) ? b[1] : (b && b.y);
       }
       if (dur == null) dur = 600;
+      this._epochGate(`拖动(${x1},${y1})→(${x2},${y2})`);
       this._advance(label || '按住拖动');
       await this.op.swipe(x1, y1, x2, y2, dur);
       this.stepResult(true);
@@ -5079,13 +5140,14 @@ async function dragScene(ctx, dir) {
      *  不代表任务本体没做完；实测 20 个任务里有 10 次这种告警，
      *  若计为失败会把大量真正完成的任务误判为未完成。 */
     async home() {
+      this._epochGate('回主界面');
       this._advance(null);
       const r = await this.nav.goHome();
       this.clearStepFail();   // ← 抵消本次 _advance 对应的失败位
       return r;
     }
     /** 打一场。opts.noHome=true 表示「一局打完不回主界面」，由任务自己处理续局（0.5.59） */
-    async fight(opts) { this._advance(null); const r = await this.battle.run(opts || {}); this.stepResult(true); return r; }
+    async fight(opts) { this._epochGate('开打一局'); this._advance(null); const r = await this.battle.run(opts || {}); this.stepResult(true); return r; }
     /** 等待场景 */
     async waitScene(s, t) { this._advance(null); const r = await this.scenes.waitFor(s, t); this.stepResult(!!r); return r; }
 
@@ -5173,6 +5235,7 @@ async function dragScene(ctx, dir) {
     async replaySeq(seq, opts) {
       const o = opts || {};
       const label = o.label || '录制回放';
+      this._epochGate(`录制回放「${label}」`);
       this._advance(label);
       const t0 = Date.now();
       // v0.5.86：宏数组第 0 项可能是 {kind:'lead', ms:N} —— 开场的「点匹配 → 首键」间隔。
@@ -9755,6 +9818,12 @@ const MissionHall = {
       for (let i = 1; i <= max; i++) {
         Runtime.check();
         task.attempt = i;
+        // ★ v0.6.63：本次尝试独占一个代次。任务结束时（正常/异常/超时/重试）
+        //   在 finally 里作废它 —— 这样即便 withTimeout 已经放弃等待，
+        //   task.run() 里的僵尸代码下次想操作画面时会被 _epochGate 拦住。
+        const epoch = Runtime.newEpoch();
+        this.ctx.epoch = epoch;
+        task.epoch = epoch;
         try {
           // 任务前先确保在主界面
           if (this.config.get('nav.requireHome')) await this.ctx.nav.ensureHome();
@@ -9780,6 +9849,14 @@ const MissionHall = {
           } else {
             throw err;
           }
+        } finally {
+          // ★ v0.6.63：本次尝试结束 —— 作废代次。
+          //   ⚠ 必须放 finally：成功 return、超时抛错、重试、AbortError 四条路径
+          //     都要作废，否则僵尸代码会带着「仍然有效」的代次继续点画面。
+          //   ⚠ 下一轮会 newEpoch() 再写 this.ctx.epoch，所以这里不必清 ctx.epoch；
+          //     但为清晰起见置 0（0 = 非任务上下文，闸门放行）。
+          Runtime.retireEpoch(epoch);
+          if (this.ctx.epoch === epoch) this.ctx.epoch = 0;
         }
       }
     }
