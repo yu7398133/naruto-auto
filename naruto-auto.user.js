@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.64
+// @version      0.6.65
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.64'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.65'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1814,6 +1814,47 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
         return { ok: redPct >= ARENA_REWARD_RED_MIN_PCT, redPct: +redPct.toFixed(1), area };
       } catch (e) {
         return { ok: false, redPct: 0, area, err: e.message };
+      }
+    }
+
+    /** [临时探针 v0.6.65] 奖励面板「暗块」判据取证 —— 用完即删。
+     *
+     *  要回答的问题（用户 2026-10-14 指出：不要靠推理，埋检测代码拿证据）：
+     *    ARENA_PANEL_DIM_AREAS 的第 4、5 块在失败时读到 30/79，几乎从不变化；
+     *    而真面板成功时 5 块全在 30 以下（26/20/14/11/9）。
+     *    ⇒ 疑问：30/79 究竟是**面板的一部分**（那提阈值会弄反），
+     *       还是**战斗准备界面自带的暗角**（那阈值 4→5 就是对的）？
+     *
+     *  取证设计（关键：**两个时刻分别测，同一批区域**）：
+     *    A. 点开面板**之前**（确定在战斗准备界面、面板必然关闭）
+     *       → 若这里就已是 3/5 且读到 30/79，则 30/79 属于准备界面，证据成立
+     *    B. 轮询期间（面板疑似打开/未打开）
+     *       → 与 A 对比；若 B 与 A 逐位相同 → 画面根本没变
+     *  另外记录每块的**坐标**，便于事后判断是哪一块在捣乱。
+     *
+     *  @param {string} phase 'before-click' | 'poll'
+     */
+    _probeArenaPanelRaw(phase) {
+      try {
+        this._fresh();
+        const rows = [];
+        for (let i = 0; i < ARENA_PANEL_DIM_AREAS.length; i++) {
+          const a = ARENA_PANEL_DIM_AREAS[i];
+          const w = a[2] - a[0], h = a[3] - a[1];
+          const d = this.ctx.getImageData(a[0], a[1], w, h).data;
+          let s = 0, n = 0;
+          for (let k = 0; k < d.length; k += 4) { s += (d[k] * 77 + d[k + 1] * 151 + d[k + 2] * 28) >> 8; n++; }
+          rows.push({ i: i + 1, box: a.join(','), luma: Math.round(s / n) });
+        }
+        const darkN = rows.filter(r => r.luma <= ARENA_PANEL_DIM_LUMA_MAX).length;
+        Utils.log('warn', `   🧪[探针] 面板判据取证 phase=${phase}` +
+          ` 阈值=≥${ARENA_PANEL_DIM_NEED}/${rows.length}块≤${ARENA_PANEL_DIM_LUMA_MAX} 实际暗块=${darkN}`);
+        Utils.log('warn', `   🧪[探针] 逐块：` +
+          rows.map(r => `#${r.i}[${r.box}]=${r.luma}`).join('  '));
+        return { phase, dark: darkN, rows };
+      } catch (e) {
+        Utils.log('warn', `   🧪[探针] 取证异常：${e.message}`);
+        return null;
       }
     }
 
@@ -5141,7 +5182,7 @@ async function dragScene(ctx, dir) {
         // ★ v0.6.64：失败当场抓现场（探针读数 + 截图），供事后定位。
         //   此前的教训：日志只说「没做到」，不说「当时屏幕长什么样」，
         //   于是每次都得回头找你截图、靠猜（如 忍术奖励面板 3/5 那次的误判）。
-        this.captureFailure(i);
+        this.captureFailure(i, '步骤未达成');
       }
       else if (this._stepFailSet) this._stepFailSet.delete(i);
       return ok;
@@ -5173,24 +5214,38 @@ async function dragScene(ctx, dir) {
      *
      * @param {number} stepIdx 步骤索引（-1 = 无流程图上下文）
      */
-    captureFailure(stepIdx) {
+    captureFailure(stepIdx, reason) {
       try {
         if (!this._failShots) { this._failShots = []; }
         if (this._failShots.length >= 6) return;
 
         // ① 场景探针全量读数
         //   ⚠ hits 是 {probeKey: {ok, dist, ...}} 的**对象**，不是数组（v0.6.64 修正）
-        let scene = 'unknown', brightness = -1, hits = [];
+        //   ★ v0.6.65：除了命中的，还要记 **TOTAL / BEST 全量距离**。
+        //     为什么：秘境卡死时红叉 dist=156、friendsIcon d=209、mailNav d=384
+        //     —— **全都在"未命中"这一侧**，光看「命中探针=[无]」说明不了
+        //     "离哪个最近、差多少"。有 BEST 才能判断是"接近但没过阈值"
+        //     还是"彻底不是这个界面"。
+        let scene = 'unknown', brightness = -1, hits = [], probeAll = null;
         try {
           const r = this.scenes.detect(false);
           scene = r.scene; brightness = r.brightness;
           const hm = r.hits || {};
           hits = Object.keys(hm).filter(k => hm[k] && hm[k].ok)
             .map(k => `${k}=${hm[k].dist == null ? '?' : Math.round(hm[k].dist)}`);
+          // 未命中的也留着（按距离升序取最接近的几个）
+          const miss = Object.keys(hm)
+            .filter(k => hm[k] && hm[k].dist != null && !hm[k].ok)
+            .map(k => ({ k, d: Math.round(hm[k].dist) }))
+            .sort((a, b) => a.d - b.d)
+            .slice(0, 8)
+            .map(x => `${x.k}=${x.d}`);
+          probeAll = { n: Object.keys(hm).length, miss };
         } catch (e) { /* 探针异常不影响抓图 */ }
 
-        // 去重键：同一步 + 同一场景 只抓一次
-        const key = `${stepIdx}|${scene}`;
+        // 去重键 ★ v0.6.65：加入 reason —— 否则导航失败（stepIdx=-1）与
+        //   普通失败在同一个「其它页」场景下会互相顶掉，只留第一条。
+        const key = `${stepIdx}|${scene}|${reason || ''}`;
         if (this._failShotKeys && this._failShotKeys.has(key)) return;
         if (!this._failShotKeys) this._failShotKeys = new Set();
         this._failShotKeys.add(key);
@@ -5204,10 +5259,14 @@ async function dragScene(ctx, dir) {
 
         const seq = this._failShots.length + 1;
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const head = `❌ 失败现场 #${seq} 步骤=${stepName}`;
+        const head = `❌ 失败现场 #${seq} 步骤=${stepName}${reason ? ` 来源=${reason}` : ''}`;
         Utils.log('warn', `${head}`);
         Utils.log('warn', `     场景=${scene} 亮度=${typeof brightness === 'number' ? brightness.toFixed(1) : brightness}` +
           ` 命中探针=[${hits.length ? hits.join(' ') : '无'}]`);
+        if (probeAll) {
+          Utils.log('warn', `     探针全量：共 ${probeAll.n} 个，` +
+            `最接近的未命中=${probeAll.miss.length ? probeAll.miss.join(' ') : '无'}`);
+        }
 
         // ② 亮度采样区（奖励面板判据是当前最可疑的一处，顺手记下来）
         let lumas = null;
@@ -5220,7 +5279,7 @@ async function dragScene(ctx, dir) {
           }
         } catch (e) { /* ignore */ }
 
-        const rec = { seq, stepIdx, stepName, scene, brightness, hits, lumas, at: Date.now() };
+        const rec = { seq, stepIdx, stepName, reason: reason || '', scene, brightness, hits, probeAll, lumas, at: Date.now() };
         this._failShots.push(rec);
 
         // ③ 截图（video 全尺寸）
@@ -5230,15 +5289,16 @@ async function dragScene(ctx, dir) {
       }
     }
 
-    /** 截图存盘（尽力而为：拿不到 video 只记日志，不抛）
+    /** 截图存内存（不落盘）—— 由面板按钮按需导出
      *
-     *  ★ v0.6.64：图片**只落盘、不写进日志**。
-     *    用户口径：「截图直接放桌面之类的地方，日志只记录放哪儿了就行，
-     *    这样日志也不至于过大」。
-     *    机制：与日志导出同一个 `a.download` → 走浏览器下载目录。
-     *    本机实测该目录 = 桌面（桌面已有 naruto-log-*.txt，Downloads 里没有）。
-     *    ⚠ 脚本无法指定绝对路径（@grant none，没有 GM_download），
-     *      日志因此只记**文件名**，并提示去下载目录找。
+     *  ★ v0.6.65：改为**只存内存**。
+     *    用户实测反馈（2026-10-14）：「截图需要我这边手动确认才行，如果脚本
+     *    自动截图，保存不了，每次都需要我手动确认才行」。
+     *    v0.6.64 用 a.click() 自动下载，假设下载是静默的 —— 这个假设没验证过，
+     *    实际会在浏览器里弹保存确认，把无人值守跑变成「卡在确认框」。
+     *    ⇒ 不再自动下载。图存内存（上限 FAIL_SHOT_KEEP 张），
+     *      用户想看图时点面板「📷 存失败图」按钮，一次导出全部。
+     *      日志仍然只记「内存里存了几张」，不记图片数据。
      */
     _grabShot(ts, seq, head) {
       try {
@@ -5250,27 +5310,39 @@ async function dragScene(ctx, dir) {
         const c = document.createElement('canvas');
         c.width = video.videoWidth; c.height = video.videoHeight;
         c.getContext('2d').drawImage(video, 0, 0);
-        // 文件名前缀固定 naruto-fail-，便于在下载目录里一眼找到/批量删除
         const fname = `naruto-fail-${ts}-#${seq}.png`;
-        const a = document.createElement('a');
-        a.href = c.toDataURL('image/png');
-        a.download = fname;
-        a.click();
+        // 只存 dataURL，不触发任何下载/确认
+        const url = c.toDataURL('image/png');
+        if (!this._failShotData) this._failShotData = [];
+        this._failShotData.push({ name: fname, url, w: c.width, h: c.height, at: Date.now() });
+        // 超出上限丢最旧的，避免长时间跑累积占内存
+        while (this._failShotData.length > FAIL_SHOT_KEEP) this._failShotData.shift();
         this._failShotFiles = this._failShotFiles || [];
         this._failShotFiles.push(fname);
-        // 日志只记「放哪儿了」，不含图片数据
-        Utils.log('warn', `     📷 截图已存：${fname}（${c.width}x${c.height}，在浏览器下载目录/桌面）`);
+        Utils.log('warn', `     📷 截图已存内存：${fname}（${c.width}x${c.height}）` +
+          ` —— 不自动落盘，需要时点面板「📷 存失败图」导出`);
         return fname;
       } catch (e) {
         Utils.log('warn', `     📷 截图异常：${e.message}`);
         return null;
       }
     }
+    /** 把内存里的失败现场截图一次性导出（面板按钮调用，用户主动触发 → 确认框可接受） */
+    saveFailureShots() {
+      const data = this._failShotData || [];
+      if (!data.length) return { ok: false, n: 0, msg: '内存里没有失败截图' };
+      for (const s of data) {
+        try {
+          const a = document.createElement('a');
+          a.href = s.url; a.download = s.name; a.click();
+        } catch (e) { /* 单张失败不影响其余 */ }
+      }
+      return { ok: true, n: data.length, msg: `已导出 ${data.length} 张` };
+    }
     /** 读本任务累计的失败现场（Runner 收尾时打印） */
     get failureShots() { return this._failShots || []; }
     /** 清空失败现场（Runner 每次尝试前调用） */
-    resetFailureShots() { this._failShots = []; this._failShotKeys = new Set(); this._failShotFiles = []; }
-    /** 清空本任务的步骤失败计数（Runner 在任务开始/重试前调用） */
+    resetFailureShots() { this._failShots = []; this._failShotKeys = new Set(); this._failShotFiles = []; }    /** 清空本任务的步骤失败计数（Runner 在任务开始/重试前调用） */
     resetStepFails() { this._stepFailSet = new Set(); }
     /** 读本任务累计的步骤失败数 */
     get stepFails() { return this._stepFailSet ? this._stepFailSet.size : 0; }
@@ -6104,6 +6176,25 @@ const SECRET_REALM_TICKET_DONE_EXIT = [[1224, 33], [636, 455]];
   // 匹配尝试总次数上界：即使一直识别失败/一直匹配到非目标秘境，也绝不会无限循环。
   // 券刷光后每次都要等 MATCH_WAIT(7s)，所以这个上界同时也是「最多耗多久」的保证。
   const SECRET_REALM_MATCH_TRIES_MAX = 60;
+  /** ★ v0.6.65：秘境导航「连续失败」达到该次数 → 强制记本任务未完成。
+   *
+   *  为什么需要（2026-10-14 实跑）：
+   *    09:56~10:04 整整 8 分钟，导航以同样三句话循环了 6 遍都没能进秘境，
+   *    任务却报「✓ 完成 (11分49秒)」。原因是导航失败全是 `⚠`，
+   *    从不 stepResult(false)，stepFails=0 → Runner 判成功。
+   *    更糟的是它把画面留在「其它页」，导致后续 6 个任务在脏状态上全报成功。
+   *
+   *  为什么不能取 1（每次导航失败都记失败）：
+   *    既有口径「导航降级不算任务未完成」是为**偶发**降级定的，
+   *    否则 20 个任务里 10 个会被误判（见 ctx.home() 里的 clearStepFail）。
+   *    故这里用**连续**语义：成功一次即清零，只有持续进不去才升级为失败。
+   *  取值依据：单次 realmNavGated 内部已自带 2 次尝试，故 2 次连续失败
+   *    = 实际 4 次「点秘境入口」都没进去 —— 足够判定是真的进不去。 */
+  const NAV_FAIL_STREAK_FAIL = 2;
+  /** ★ v0.6.65：内存里最多保留多少张失败现场截图。
+   *  只存内存（不自动落盘）—— 见 TaskContext._grabShot 的说明。
+   *  取 6 与单任务抓取上限一致；超出丢最旧的，防止长跑累积占内存。 */
+  const FAIL_SHOT_KEEP = 6;
   // 战斗失败（超时）连续达到这个场数就停手退出，避免一直失败一直重试。
   const SECRET_REALM_FAIL_MAX = 3;
 
@@ -8489,6 +8580,16 @@ const MissionHall = {
         //   「第一下点击之后应该进入第 2 个场景，里面右上角有红叉；如果没有，
         //     就说明没进去，就回到主界面然后重来」。红叉复用既有标准件 sawRedX()。
         //   抽成 realmNavGated() 是因为后面还有 2 处「重新导航」也要走同一道闸门。
+        // ★ v0.6.65：导航**连续失败计数**（用户口径 2026-10-14）。
+        //   背景：本次实跑 09:56~10:04 共 8 分钟，realmNavGated 以完全相同的
+        //   三句话（没看到红叉 / 未探测到准备图标 / 放弃导航）循环了 6 遍，
+        //   最后任务却报「✓ 完成 (11分49秒)」——因为导航失败一律是 `⚠`，
+        //   从不调用 stepResult(false)，于是 stepFails=0，Runner 判成功。
+        //   ⚠ 不能简单地把每次导航失败都记失败：那条「导航降级不算任务未完成」
+        //     的豁免是为**偶发**降级定的（否则 20 个任务里 10 个会被误判）。
+        //     但**连续**失败是另一回事 —— 它说明确实进不去，任务不可能完成。
+        //   故：连续失败达到阈值才记一次失败，成功一次即清零（见 navFailStreak）。
+        let navFailStreak = 0;
         const realmNavGated = async (tag) => {
           for (let navTry = 1; navTry <= 2; navTry++) {
             if (navTry > 1) {
@@ -8505,12 +8606,31 @@ const MissionHall = {
             }
             Utils.log('info', `   ✓ [${tag}] 已进入第 2 场景（右上角红叉 dist=${rx.dist}）→ 继续后续导航`);
             await ctx.replaySeq(SECRET_REALM_NAV_AFTER, { label: `[${tag}] 导航②进入秘境准备界面` });
-            return true;
+            navFailStreak = 0;                     // ★ v0.6.65：成功即清零
+            return { ok: true, navTry };
           }
           Utils.log('warn', `   ⚠ [${tag}] 连续 2 次都没进入第 2 场景 → 放弃导航`);
-          return false;
+          navFailStreak++;                         // ★ v0.6.65：累计连续失败
+          // ★ v0.6.65：导航失败**也要抓现场**。
+          //   为什么：2026-10-14 秘境卡死 8 分钟，日志里全是导航 `⚠`，
+          //   一个 `stepResult(false)` 都没有 → 所以既没记失败、也没抓图，
+          //   事后完全无法知道当时是什么界面（只能推断「大概在结算浮层」）。
+          //   这里显式抓一次 —— 取证不依赖「算不算失败」这个判定。
+          Utils.log('error', `   ❌ [${tag}] 导航失败，抓取现场供事后定位`);
+          ctx.captureFailure(-1, `秘境导航失败[${tag}]`);
+          if (navFailStreak >= NAV_FAIL_STREAK_FAIL) {
+            // 到这里说明**反复**进不去秘境：本轮不可能完成，如实记失败。
+            // ⚠ 只在跨过阈值的那一次记（此后每个 navFailStreak 都 >= 阈值，
+            //   会重复记；用整除判定，保证「每 N 次连续失败记 1 个失败步」）。
+            if ((navFailStreak - NAV_FAIL_STREAK_FAIL) % NAV_FAIL_STREAK_FAIL === 0) {
+              Utils.log('error', `   ✗ [${tag}] 导航连续失败 ${navFailStreak} 次` +
+                `（阈值 ${NAV_FAIL_STREAK_FAIL}）→ 本轮确实进不去秘境，**记为本任务未完成**`);
+              ctx.stepResult(false);
+            }
+          }
+          return { ok: false, navTry: 2, streak: navFailStreak };
         };
-        if (!(await realmNavGated('首次导航'))) {
+        if (!(await realmNavGated('首次导航')).ok) {
           // ⚠ v0.6.29：这里**不能直接 return** —— 本任务 run() 无返回值语义，
           //   正常出口是「走到函数末尾 await ctx.home()」。直接 return 会把画面
           //   留在错误页（正是我们要避免的）。故先回主界面再退出。
@@ -9269,6 +9389,10 @@ const MissionHall = {
          */
         const claimArenaRewards = async (tag) => {
           ctx.op.releaseHold();
+          // 🧪 [临时探针 v0.6.65] 取证 A：**点开面板之前**。
+          //   此刻确定在战斗准备界面、面板必然关闭。若这里就读到 3/5（含 30/79），
+          //   则 30/79 属于准备界面自带暗角 —— 提阈值 4→5 才是对的。
+          ctx.vision._probeArenaPanelRaw('before-click');
           Utils.log('info', `🎁 [${tag}] 打开忍术奖励面板`);
           await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
           await Utils.sleep(1800);          // 面板展开动画
@@ -9280,16 +9404,30 @@ const MissionHall = {
           //   整个忍术对战任务直接放弃回主界面，**打了 3 局一次「领取」都没点**。
           //   ⇒ 面板若开得比 1800ms 慢，脚本就白打一批。这里改成最多等 6s、每 500ms 判一次，
           //     任一拍达标即通过：开得快不浪费时间，开得慢也不会误杀。
-          //   ⚠ 判据本身（ARENA_PANEL_DIM_AREAS / LUMA_MAX / NEED）**一律不动** ——
-          //     它是给终态面板标定的，问题只在「读得太早」，不在阈值。
+          //   ⚠⚠ v0.6.65 更正：上面那句「读得太早」的诊断**是错的**。
+          //     三次独立实测的读数几乎逐位相同 ——
+          //       2026-10-09   102/90/55/30/79  (3/5)
+          //       2026-10-14早 100/91/55/30/79  (3/5)
+          //       2026-10-14晚 101/91/54/30/79  (3/5)
+          //     6 秒轮询里读数**根本不变化**（不是"往暗走"）—— 说明画面根本没变，
+          //     不存在"动画没跑完"。故「判据一律不动」这条禁令已失效。
+          //     但**先取证再改**：用 _probeArenaPanelRaw 记录 A/B 两时刻逐块读数，
+          //     确认 30/79 属于准备界面而非面板，再决定阈值。（用户 2026-10-14 口径）
           const REWARD_PANEL_WAIT_MS = 6000;
           const REWARD_PANEL_POLL_MS = 500;
           let pnl = ctx.vision.sawArenaRewardPanel();
           if (!pnl.ok) {
             const pt0 = Date.now();
+            let pollN = 0;
             while (Date.now() - pt0 < REWARD_PANEL_WAIT_MS) {
               await Utils.sleep(REWARD_PANEL_POLL_MS);
+              // 🧪 [临时探针 v0.6.65] 取证 B：轮询期间逐块读数。
+              //   只记第 1 拍和最后一拍，避免 6 秒轮询刷屏。
+              pollN++;
               const p2 = ctx.vision.sawArenaRewardPanel();
+              if (pollN === 1 || p2.ok || Date.now() - pt0 + REWARD_PANEL_POLL_MS >= REWARD_PANEL_WAIT_MS) {
+                ctx.vision._probeArenaPanelRaw(`poll#${pollN}`);
+              }
               if (p2.ok) {
                 pnl = p2;
                 Utils.log('info', `🎁 [${tag}] ✓ 奖励面板延迟打开（+${Date.now() - pt0}ms 后才满足判据，` +
@@ -9302,6 +9440,9 @@ const MissionHall = {
           if (!pnl.ok) {
             Utils.log('warn', `🎁 [${tag}] ⚠ 奖励面板**没打开**（等了 ${REWARD_PANEL_WAIT_MS}ms，` +
               `暗块 ${pnl.dark}/${pnl.total}，亮度 ${pnl.lumas.join('/')}）→ 不点领取，改用右上角红叉位还原界面`);
+            // 🧪 [临时探针 v0.6.65] 取证 C：面板**确定没打开**这一刻的逐块读数。
+            //   与 A（点击前）对比：若两者逐位相同 ⇒ 点击根本没生效/界面没变。
+            ctx.vision._probeArenaPanelRaw('panel-not-opened');
             // 用户口径：「把这个流程的点最右改成点右上角红x的位置，这样点错也没关系」
             const [cx, cy] = PROBES.closeX.click;
             await ctx.op.clickNatural(cx, cy, null, '还原界面（点右上角红叉位）');
@@ -9390,6 +9531,8 @@ const MissionHall = {
         const peek = await claimArenaRewards('首次进场');
         if (!peek.opened) {
           Utils.log('warn', '🎁 ⚠ 首次进场连奖励面板都没打开 → 回主界面重新完整执行');
+          // ★ v0.6.65：同批尾——真失败，如实记（理由见下方「第 N 批打完后」处注释）
+          ctx.stepResult(false);
           await ctx.home();
           return;
         }
@@ -9471,6 +9614,13 @@ const MissionHall = {
             //   面板没打开说明画面已经不对（打也打不成、领也领不到），
             //   继续在这个界面上开下一批只会像上次那样空转 100+ 批。
             Utils.log('warn', `🎁 第 ${batch} 批后奖励面板没打开 → 回主界面，重新完整执行本任务`);
+            // ★ v0.6.65：**如实记失败**。
+            //   用户口径：「没完成就没完成，后面才好重新完成」。
+            //   此前的 bug（2026-10-09 起，2026-10-14 两次复现）：这里只是 return，
+            //   而 Runner 只看 stepFails —— 于是一个「打了 3 局、一次奖励都没领到」
+            //   的任务被报成「✓ 完成 (11分37秒)」，用户完全看不出没完成。
+            //   ⚠ 这是**真失败**，不是导航降级：奖励确实没领到。
+            ctx.stepResult(false);
             await ctx.home();
             return;
           }
@@ -9998,15 +10148,21 @@ const MissionHall = {
         } else {
           Utils.log('warn', `  │ 失败现场 ${shots.length} 处（按发生顺序）：`);
           for (const s of shots) {
-            Utils.log('warn', `  │   #${s.seq} 步骤「${s.stepName}」 场景=${s.scene} 亮度=${s.brightness}`);
+            Utils.log('warn', `  │   #${s.seq} 步骤「${s.stepName}」` +
+              `${s.reason ? ` 来源=${s.reason}` : ''} 场景=${s.scene} 亮度=${s.brightness}`);
             Utils.log('warn', `  │        命中探针=[${s.hits && s.hits.length ? s.hits.join(' ') : '无'}]` +
               (s.lumas ? ` 奖励面板亮度=[${s.lumas.join('/')}]` : ''));
+            // ★ v0.6.65：未命中的探针距离 —— 判断「接近但差一点」还是「完全不是这个界面」
+            if (s.probeAll && s.probeAll.miss && s.probeAll.miss.length) {
+              Utils.log('warn', `  │        最接近的未命中(共${s.probeAll.n}探针)=[${s.probeAll.miss.join(' ')}]`);
+            }
           }
         }
         // ③ 落盘级 —— 只记文件名，不含图片数据（日志体积不受截图影响）
         const files = this.ctx._failShotFiles || [];
         if (files.length) {
-          Utils.log('warn', `  │ 截图(${files.length}) 已存到「浏览器下载目录」= 桌面：`);
+          Utils.log('warn', `  │ 截图(${files.length}) 已存内存，不自动落盘；` +
+            `需要时点面板「📷 存失败图」导出：`);
           for (const f of files) Utils.log('warn', `  │   ${f}`);
         } else {
           Utils.log('warn', `  │ 截图：无（video 未就绪或未走到抓图分支）`);
@@ -10822,6 +10978,7 @@ const MissionHall = {
             <button class="btn" id="na-calib-play">▶ 回放</button>
             <button class="btn" id="na-calib-dl">💾 导出</button>
             <button class="btn" id="na-shot">📷 截图</button>
+            <button class="btn" id="na-failshot">🖼 存失败图</button>
             <button class="btn" id="na-multitouch">⌨ 键盘多键自检</button>
             <button class="btn" id="na-layer">🖱 层诊断</button>
           </div>
@@ -11037,6 +11194,19 @@ const MissionHall = {
           a.click();
           this.addLog('i', `📷 已截图 ${c.width}x${c.height} → naruto-shot-${ts}.png`);
         } catch (e) { this.addLog('e', '截图异常: ' + (e.message || e)); }
+      };
+
+      // 🖼 存失败图：把内存里攒的失败现场截图一次性导出（★ v0.6.65）
+      //   —— 用户主动点，所以浏览器弹保存确认是可接受的；
+      //      自动截图则不能触发下载（会卡住无人值守跑）。
+      //   没有失败记录时明确告知，不静默。
+      p.querySelector('#na-failshot').onclick = () => {
+        try {
+          const s = this.app.ctx.saveFailureShots();
+          this.addLog(s.ok ? 'i' : 'w', '🖼 ' + s.msg);
+        } catch (e) {
+          this.addLog('e', '失败图导出异常: ' + (e.message || e));
+        }
       };
 
       // 💾 日志导出 / 复制 / 清空（v0.5.93）
@@ -11580,10 +11750,13 @@ const MissionHall = {
           && this.app.scheduler.ctx._failShotFiles) || [];
         if (shots.length || files.length) {
           diag = '失败现场（最近一次任务）：\n' +
-            shots.map(s => `  #${s.seq} 步骤「${s.stepName}」 场景=${s.scene} 亮度=${s.brightness}` +
+            shots.map(s => `  #${s.seq} 步骤「${s.stepName}」` +
+              `${s.reason ? ` 来源=${s.reason}` : ''} 场景=${s.scene} 亮度=${s.brightness}` +
               ` 命中探针=[${s.hits && s.hits.length ? s.hits.join(' ') : '无'}]` +
+              (s.probeAll && s.probeAll.miss && s.probeAll.miss.length
+                ? ` 最接近未命中=[${s.probeAll.miss.join(' ')}]` : '') +
               (s.lumas ? ` 奖励面板亮度=[${s.lumas.join('/')}]` : '')).join('\n') + '\n' +
-            `  截图(${files.length})（在浏览器下载目录/桌面，按文件名找）：\n` +
+            `  截图(${files.length})（存内存，点面板「🖼 存失败图」导出）：\n` +
             files.map(f => `    ${f}`).join('\n') + '\n' + `${'─'.repeat(60)}\n`;
         }
       } catch (e) { /* 诊断信息尽力而为，不影响日志导出 */ }
