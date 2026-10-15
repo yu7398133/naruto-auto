@@ -1,67 +1,96 @@
-// 打开 user.js 安装页，定位并点击「安装/更新」按钮
+// 安装用户脚本：打开 .user.js → 轮询捕获 ask.html → 立刻点「安装/重新安装」。
+//
+// 2026-10-15 实测得出的三个要点（旧版 tm-install-flow.js 就是栽在这里）：
+//   ① ask.html 是**瞬时**页面，出现后要尽快点，否则它自己关掉 → 必须紧凑轮询捕获，不能固定 sleep 一次。
+//   ② /json/new 开的是后台标签，确认页仍会出现，但要 /json/activate 之后 Input.* 才生效
+//      （后台标签的 Input 会被静默吞掉，既不报错也不应答）。
+//   ③ 目标页 script_installation.php 只是 TM 官方文档页，**没有**安装按钮；
+//      真正的按钮在 chrome-extension://.../ask.html 上。找错页面就会报「未找到安装按钮」。
 const http = require('http');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const TARGET = process.argv[2] || 'http://127.0.0.1:8899/naruto-auto.user.js';
 
-const getJSON = (p) => new Promise((res, rej) => {
+const get = (p) => new Promise((res, rej) => {
   http.get({ host: '127.0.0.1', port: 9222, path: p }, r => {
     let d = ''; r.on('data', c => d += c); r.on('end', () => res(JSON.parse(d)));
   }).on('error', rej);
 });
-
-function cdp(wsUrl) {
+const put = (p) => new Promise((res, rej) => {
+  http.get({ host: '127.0.0.1', port: 9222, path: p, method: 'PUT' }, r => {
+    r.resume(); r.on('end', res);
+  }).on('error', rej);
+});
+function conn(u) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    let id = 0; const pend = new Map();
-    const send = (m, p) => new Promise(r => {
-      const i = ++id; pend.set(i, r);
-      ws.send(JSON.stringify({ id: i, method: m, params: p }));
-    });
-    ws.addEventListener('message', ev => {
-      const j = JSON.parse(ev.data);
+    const ws = new WebSocket(u); let id = 0; const pend = new Map();
+    ws.addEventListener('message', e => {
+      const j = JSON.parse(e.data);
       if (j.id && pend.has(j.id)) { pend.get(j.id)(j); pend.delete(j.id); }
     });
-    ws.addEventListener('open', () => resolve({ ws, send }));
+    ws.addEventListener('open', () => resolve({
+      ws, send: (m, p) => new Promise(r => { const i = ++id; pend.set(i, r); ws.send(JSON.stringify({ id: i, method: m, params: p })); })
+    }));
     ws.addEventListener('error', reject);
   });
 }
 
 (async () => {
-  const TARGET = 'http://127.0.0.1:8899/naruto-auto.user.js';
+  console.log('目标: ' + TARGET);
+  // 清掉可能残留的安装页，避免误点上一次的旧确认框
+  const pre = await get('/json/list');
+  for (const t of pre.filter(x => x.url.includes('script_installation'))) {
+    await new Promise(r => http.get({ host: '127.0.0.1', port: 9222, path: '/json/close/' + t.id }, q => { q.resume(); q.on('end', r); }).on('error', r));
+  }
+  await put('/json/new?' + encodeURIComponent(TARGET));
 
-  // 打开安装页
-  const u = `http://127.0.0.1:9222/json/new?${encodeURIComponent(TARGET)}`;
-  await new Promise((res, rej) => http.get(u, { method: 'PUT' }, r => { r.resume(); r.on('end', res); }).on('error', rej));
-  await sleep(4000);
+  // 紧凑轮询捕获 ask.html（瞬时页面）
+  let hit = null;
+  for (let k = 0; k < 60 && !hit; k++) {
+    await sleep(300);
+    const l = await get('/json/list');
+    hit = l.find(t => t.url.includes('ask.html'));
+  }
+  if (!hit) { console.log('未捕获 ask.html（确认页瞬时消失）'); process.exit(1); }
+  console.log('确认页: ' + hit.title);
 
-  const tabs = await getJSON('/json/list');
-  console.log('=== 当前页面 ===');
-  tabs.filter(t => t.type === 'page').forEach(t => console.log(`[${t.title}]\n   ${t.url.slice(0,120)}`));
-
-  // 找安装页
-  const installTab = tabs.find(t => t.type === 'page' && (
-    t.url.includes('script_installation') || t.url.includes('ask.html') || t.url.includes('tampermonkey.net')
-  ));
-  if (!installTab) { console.log('\n未找到安装页 —— 可能直接重定向了'); process.exit(0); }
-
-  console.log('\n=== 安装页内容 ===');
-  const { ws, send } = await cdp(installTab.webSocketDebuggerUrl);
+  await put('/json/activate/' + hit.id);
+  await sleep(600);
+  const { ws, send } = await conn(hit.webSocketDebuggerUrl);
   await send('Runtime.enable', {});
-  const ev = async (expr) => {
-    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
-    if (r?.result?.exceptionDetails) return { __exc: String(r.result.exceptionDetails.text).slice(0,300) };
-    return r?.result?.result?.value;
-  };
 
-  await sleep(1500);
-  console.log(await ev(`JSON.stringify({
-    url: location.href,
-    title: document.title,
-    text: document.body.innerText.slice(0, 900),
-    buttons: Array.from(document.querySelectorAll('button,input[type=button],input[type=submit],a')).map(b => ({
-      tag: b.tagName, id: b.id, cls: (b.className||'').toString().slice(0,40),
-      text: (b.innerText||b.value||'').trim().slice(0,30)
-    })).filter(b => b.text).slice(0, 25)
-  }, null, 1)`));
-
+  let clicked = null;
+  for (let k = 0; k < 20; k++) {
+    const r = await send('Runtime.evaluate', {
+      expression: `(() => {
+        // ⚠ 按钮文案不止一种：首次安装=「安装」，已装过=「更新」，还有「重新安装」。
+        //   同时页面上还有一个「禁用更新」按钮 —— 必须排除，否则会误点成"再也不要更新"。
+        const RE_OK = /^(安装|更新|重新安装)$/;
+        const RE_BAD = /禁用|取消/;
+        const all = [...document.querySelectorAll('input,button,a')];
+        const b = all.find(x => {
+          const s = ((x.value || x.innerText || '') + '').trim();
+          return RE_OK.test(s) && !RE_BAD.test(s);
+        });
+        if (!b) return JSON.stringify({ none: true, seen: all.map(x => ((x.value || x.innerText || '') + '').trim()).filter(Boolean).slice(0, 12) });
+        const q = b.getBoundingClientRect();
+        return JSON.stringify({ txt: (b.value || b.innerText || '').trim(), x: q.x + q.width/2, y: q.y + q.height/2 });
+      })()`, returnByValue: true
+    });
+    const v = r.result && r.result.result && r.result.result.value;
+    if (v) {
+      const btn = JSON.parse(v);
+      if (btn.none) { await sleep(400); continue; }
+      console.log('按钮: ' + btn.txt + ' @(' + Math.round(btn.x) + ',' + Math.round(btn.y) + ')');
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await send('Input.dispatchMouseEvent', { type, x: btn.x, y: btn.y, button: 'left', clickCount: 1 });
+        await sleep(120);
+      }
+      clicked = btn.txt;
+      break;
+    }
+    await sleep(400);
+  }
   ws.close();
-})().catch(e => { console.log('ERR', e.message); process.exit(1); });
+  console.log(clicked ? ('已点击: ' + clicked) : '未找到安装按钮');
+  process.exit(clicked ? 0 : 1);
+})();

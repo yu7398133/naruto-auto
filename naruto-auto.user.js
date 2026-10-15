@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.65
+// @version      0.6.66
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.65'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.66'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1520,6 +1520,69 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
 
     dist(a, c) { return Math.abs(a.r - c.r) + Math.abs(a.g - c.g) + Math.abs(a.b - c.b); }
 
+    /**
+     * 区域像素**分类占比**（v0.6.66）。
+     *
+     * 为什么需要它：`match()` 比的是区域**均值**，而「按钮里是亮黄字还是深色字」
+     * 这种差异会被均值抹平 —— 招财按钮的金底对两种文字都占绝大多数像素，
+     * 均值几乎不变。这正是旧 goldFreeText/goldDone「两态色距仅≈25」的根因：
+     * 不是阈值没收紧，而是**判据本身选错了**（用均值去测文字颜色）。
+     *
+     * 改为直接数「有多少比例的像素落在某个色类里」，文字笔画占比就从
+     * 噪音变成主信号：亮黄 28.3% vs 1.0%、深色 9.7% vs 0.1%（见 PROBES.goldFreeNow）。
+     *
+     * @param {number[]} area [x0,y0,x1,y1]（视口坐标）
+     * @param {object} cls   分类器之一：brightYellow / dark / gold
+     * @returns {{n:number, pct:number}} 命中像素数与占比（%）
+     */
+    ratioIn(area, cls) {
+      this._fresh();   // 与 match 一致：不依赖调用方先截图，避免读到旧帧
+      const [x0, y0, x1, y1] = area;
+      const w = Math.max(1, Math.round(x1 - x0)), h = Math.max(1, Math.round(y1 - y0));
+      const d = this.ctx.getImageData(Math.round(x0), Math.round(y0), w, h).data;
+      let hit = 0;
+      const n = d.length / 4;
+      for (let i = 0; i < d.length; i += 4) {
+        if (cls(d[i], d[i + 1], d[i + 2])) hit++;
+      }
+      return { n, hit, pct: 100 * hit / n };
+    }
+
+    /** 分类器：亮黄文字（免费一次态 (247,255,117)） */
+    static get CLS_BRIGHT_YELLOW() { return (r, g, b) => r > 230 && g > 230 && b < 180; }
+    /** 分类器：深色文字（招财态 (29,13,0)） */
+    static get CLS_DARK() { return (r, g, b) => r < 80 && g < 80 && b < 80; }
+    /** 分类器：金色按钮底（用于确认「确实在招财页」） */
+    static get CLS_GOLD() { return (r, g, b) => r > 200 && g > 140 && b < 130; }
+
+    /**
+     * 招财按钮状态识别（v0.6.66）——正反双判据。
+     *
+     * 用户口径（2026-10-15）：正向（免费一次）与反向（招财）**都要有**；
+     * 两个都不命中 ⇒ 说明**场景错误**（没进招财页/页面没加载完），而不是「另一种状态」。
+     * 单一判据做不到这一点：它未命中时无法区分上面两种情形。
+     *
+     * @returns {{state:'free'|'paid'|'unknown', bright:number, dark:number, msg:string}}
+     */
+    goldButtonState() {
+      const bright = this.ratioIn(PROBES.goldFreeNow.area, VisionCore.CLS_BRIGHT_YELLOW).pct;
+      const dark = this.ratioIn(PROBES.goldPaidNow.area, VisionCore.CLS_DARK).pct;
+      const freeHit = bright >= PROBES.goldFreeNow.brightMin;
+      const paidHit = dark >= PROBES.goldPaidNow.darkMin;
+      // 两个都命中 = 半透明过渡帧/动画中 → 当作 unknown，让调用方稍后重试，
+      // 不要硬判成某一态（招财点击后有约 1s 的按钮刷新动画）。
+      if (freeHit && !paidHit) {
+        return { state: 'free', bright, dark, msg: `亮黄 ${bright.toFixed(1)}% ≥ ${PROBES.goldFreeNow.brightMin}% ⇒ 免费一次` };
+      }
+      if (paidHit && !freeHit) {
+        return { state: 'paid', bright, dark, msg: `深色 ${dark.toFixed(1)}% ≥ ${PROBES.goldPaidNow.darkMin}% ⇒ 招财` };
+      }
+      if (freeHit && paidHit) {
+        return { state: 'unknown', bright, dark, msg: `两态判据同时命中（亮黄 ${bright.toFixed(1)}% / 深色 ${dark.toFixed(1)}%）⇒ 疑似动画过渡帧，稍后重测` };
+      }
+      return { state: 'unknown', bright, dark, msg: `两态判据都不命中（亮黄 ${bright.toFixed(1)}% < ${PROBES.goldFreeNow.brightMin}% 且 深色 ${dark.toFixed(1)}% < ${PROBES.goldPaidNow.darkMin}%）⇒ 场景错误：不在招财页或页面未加载完` };
+    }
+
     /** 匹配一个探针 {area, color, tol, minStd, maxStd} */
     match(probe) {
       this._fresh();   // 0.5.42：不再依赖调用方先截图，避免读到旧帧导致静默判定失败
@@ -2222,13 +2285,24 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
     // 招完态 2026-09-11 实测：同区域 avg(217,167,22)/std45（按钮文字变为图标+「招财」）。
     // 两态色距仅 ≈25 → tol 收到 18；再叠 minStd=52（免费 56 / 招完 45，双条件互为保险）。
     // 注意：招完态样本仅今日一次采样，若出现漏判/误判需用两态画面各多次采样重标定。
-    // 注意：2026-09-13 起「招财」任务改为**不识别、直接连点 2 次**（用户口径），
-    // 下面两个探针已不被任务引用，仅作标定值备查（要恢复识别判定可直接取回）。
-    goldFreeText:{ area: [804, 544, 864, 584],     color: { r: 198, g: 153, b: 30 },  tol: 18, minStd: 52, click: [830, 555],  label: '免费一次(招财)', verified: true },
-    // 招财页「已招完」态（免费次数用完后按钮变成「10 招财」）。2026-09-12 实测 avg(217,167,22)/std44。
-    // 与免费态色距 41（>tol 20）、std 44（<maxStd 52）→ 两个探针互斥，用来区分
-    // 「页面没打开」和「今日免费已用完」，避免后者被当成前者误报。
-    goldDone:    { area: [804, 544, 864, 584],     color: { r: 217, g: 167, b: 22 },  tol: 20, maxStd: 52, click: [830, 555],  label: '招财·已招完', verified: true },
+    // ⚠ v0.6.66 更正：上面「两态色距仅≈25」的标定**取样窗位置偏了**，这是它一直不稳的根因。
+    //   2026-10-15 用两态真机截图（1920x1080，缩放 1.5 回脚本视口）重测：
+    //     · 旧区 [804,544,864,584] 覆盖的是按钮**左边缘+纯金外框**，几乎不含笔画
+    //       → 金色占比 免费 34.3% vs 招财 60.8%，仅 1.8x，**没有区分度**。
+    //     · 真正的判据是**按钮内文字的颜色**：
+    //         免费一次态 = 亮黄字 (247,255,117)   → 亮黄像素占比 28.3%
+    //         招财态     = 深色字 (29,13,0)       → 深色像素占比  9.7%
+    //   故改用文字主体区 [779,555,837,575]（样本 x1169..1256 y833..863），
+    //   亮黄 28.3% vs 1.0%（28x 分离）、深色 9.7% vs 0.1%（97x 分离）——两个方向都很干净。
+    //
+    // 判据正反向都给（用户 2026-10-15 口径）：
+    //   正向 goldFreeNow = 「还能免费招财」；反向 goldPaidNow = 「已进入付费/招财态」。
+    //   两者都不命中 ⇒ 既不是免费态也不是招财态 ⇒ **场景错误**（没进招财页 / 页面未加载完）。
+    //   不用单一判据的原因是：只认一个的话，未命中时无法区分「另一种态」和「压根不在这个页面」。
+    goldFreeNow:  { area: [779, 555, 837, 575], brightMin: 8,  click: [804, 563], label: '招财·免费一次', verified: true,
+                    note: 'v0.6.66 实测：亮黄像素占比 >=8% ⇒ 免费态（免费 28.3% / 招财 1.0%）' },
+    goldPaidNow:  { area: [779, 555, 837, 575], darkMin: 4,    click: [804, 563], label: '招财·招财态',   verified: true,
+                    note: 'v0.6.66 实测：深色像素占比 >=4% ⇒ 招财态（招财 9.7% / 免费 0.1%）' },
 
     // 小队突袭「金币多倍」弹窗（不参与场景判定，仅任务内识别用）
     // 2026-09-12 两次校准录制差分实测：有弹窗 [400,300,480,340] avg(240,238,213)/std≈2（米白弹窗面板）；
@@ -7535,46 +7609,118 @@ const MissionHall = {
    *  要再调就改这里。 */
   const GOLD_FREE_GAP_MS = 2000;
 
+  /** v0.6.66：招财按钮状态最多重读几次。
+   *  招财页从主界面切过来需要时间，第一次读数可能是过渡帧（两态判据同时命中或都不命中）。
+   *  注意这不是「多等一会儿」，而是「等到它有确定结论」——上限只是防止在
+   *  真正错误的界面上无限空转（用户口径：都没命中 ⇒ 场景错误）。 */
+  const GOLD_STATE_TRIES = 5;
+  /** 两次状态重读之间的间隔（ms）。5 次 × 600ms ≈ 3s 上限。 */
+  const GOLD_STATE_RETRY_MS = 600;
+
   const TASK_DEFS = [
 
     // ————— 每日收获 —————
     {
       key: 'collectGold', name: '招财', category: 'collect',
       /** 流程图步骤声明（画面流程图 + 预览用；与下方 run 动作一一对应）
-       *  2026-09-13 用户口径：**不再做视觉识别**——打开招财页后默认直接点 2 次「免费招财」位 (830,555)。
-       *  2026-09-19：两次间隔 0.5s → GOLD_FREE_GAP_MS(2s)。用户反馈 0.5s 太快、第 2 次点击容易没被记上
-       *  （"太快了，怕少点"）。（更早还试过用探针 goldFreeText/goldDone 判定就绪与免费态，真机上不稳定） */
+       *  2026-10-15 用户口径（恢复识别，取代 09-13 的「无脑连点 2 次」）：
+       *    「识别『免费一次』作为判据：如果变成『招财』就停止算完成；
+       *      如果一开始就是『招财』，那就直接完成、不点击。
+       *      这个识别最好正向反向都有；如果没识别到，那说明场景错误。」
+       *  ⇒ 每次点击前先读按钮状态：free → 点；paid → 停；unknown → 场景错误记失败。 */
       steps: [
         { kind: 'tap', title: '打开招财页', detail: '点主界面顶部「招财」入口 (762,44)，等页面加载', coord: [COORDS.collect.goldEntry.x, COORDS.collect.goldEntry.y], color: '88,166,255' },
-        { kind: 'tap', title: '免费招财 #1', detail: '不做识别，直接点 (830,555)', coord: [830, 555], color: '126,231,135' },
-        { kind: 'tap', title: '免费招财 #2', detail: '等 2s（GOLD_FREE_GAP_MS）后再点 (830,555)', coord: [830, 555], color: '126,231,135' },
+        { kind: 'tap', title: '识别按钮状态', detail: '正反双判据：亮黄字=免费一次 / 深色字=招财；都不命中=场景错误', coord: null, color: '210,153,34' },
+        { kind: 'tap', title: '免费招财 #1', detail: '确认为免费态才点 (804,563)', coord: [804, 563], color: '126,231,135' },
+        { kind: 'tap', title: '免费招财 #2', detail: '等 2s 后重新识别；仍是免费态才点第 2 次', coord: [804, 563], color: '126,231,135' },
         { kind: 'tap', title: '返回主界面', detail: '点右上「返回」按钮 (1087,118)', coord: [COORDS.collect.goldBack.x, COORDS.collect.goldBack.y], color: '248,81,73' },
         { kind: 'check', title: '回主界面', detail: 'goHome 每轮截图识别场景（最多 6 轮）', coord: null, color: '188,140,255' },
       ],
       async run(ctx) {
         await ctx.flow(this);   // 展开画面流程图（读本任务 steps）
         await ctx.go(COORDS.collect.goldEntry, null, '打开招财页');
-        // 不做识别，直接点 2 次「免费招财」位 (830,555)。
-        //   这里用底层 clickNatural + 显式 sleep，而不用 ctx.tap —— ctx.tap 收尾会走
-        //   delay.click 区间，间隔不可控。
-        //   0.5.52：按用户要求拆成「免费招财 #1 / #2」两个流程图步骤（"做成两步"）。
-        //   0.5.76：0.5s → GOLD_FREE_GAP_MS(2s)。0.5s 时第 2 次点击常落在第 1 次的招财动画
-        //     /按钮刷新窗口里而**没被记上**（用户："太快了，怕少点"）。
-        const GOLD_FREE_X = 830, GOLD_FREE_Y = 555;
+
+        // ── 按钮状态识别（v0.6.66）─────────────────────────────────────────
+        // 用正反双判据（见 VisionCore.goldButtonState）：亮黄字=免费一次 / 深色字=招财。
+        // 两者都不命中 ⇒ 场景错误（不在招财页），如实记失败，不做「无脑点两次」的兜底。
+        const GOLD_FREE_X = 804, GOLD_FREE_Y = 563;
+
+        ctx._advance('识别按钮状态');
+        // 等页面加载完再读；招财页从主界面切过来需要一点时间，读太早会误判场景错误。
+        // 「等到它出现」而不是「多等一会儿」：最多重读 GOLD_STATE_TRIES 次。
+        let st = null;
+        for (let i = 1; i <= GOLD_STATE_TRIES; i++) {
+          st = ctx.vision.goldButtonState();
+          Utils.log('info', `    🔍 招财按钮状态 ${i}/${GOLD_STATE_TRIES}：${st.state} —— ${st.msg}`);
+          if (st.state !== 'unknown') break;
+          // unknown 有两种成因：页面还没加载完（会自愈）/ 真的不在招财页（不会自愈）。
+          // 两者无法在一次读数里区分，只能给有限的几次重试机会，超时即判失败。
+          if (i < GOLD_STATE_TRIES) await Utils.sleep(GOLD_STATE_RETRY_MS);
+        }
+
+        if (!st || st.state === 'unknown') {
+          // 用户口径：「如果没识别到，那说明场景错误」→ 记失败，不点击。
+          Utils.log('warn', `    ✗ 招财按钮两态判据都没命中 → 判定场景错误，不做无脑点击`);
+          ctx.stepResult(false);
+          await ctx.captureFailure(-1, '招财-场景错误(两态判据均未命中)');
+          await ctx.tap(COORDS.collect.goldBack, null, '返回主界面');
+          await ctx.home();
+          return;
+        }
+
+        ctx.stepResult(true);   // 「识别按钮状态」这一步达成（拿到了确定的 free/paid 结论）
+
+        // 一开始就是「招财」态 ⇒ 今天免费用完了，直接完成，一次都不点。
+        if (st.state === 'paid') {
+          Utils.log('info', `    ✓ 一开始就是「招财」态（免费用完）→ 直接完成，不点击`);
+          await ctx.tap(COORDS.collect.goldBack, null, '返回主界面');
+          await ctx.home();
+          return;
+        }
+
+        // ── 免费态：最多点 2 次，每次点击前重新识别 ────────────────────────
+        //   「如果变成『招财』就停止算完成」——所以第 2 次点击前必须重测，
+        //   否则会把一次付费招财也点出去（那要花铜币）。
+        let clicks = 0;
         for (let i = 1; i <= 2; i++) {
           ctx._advance('免费招财 #' + i);
           if (i > 1) {
-            Utils.log('info', `    ⏳ 等 ${GOLD_FREE_GAP_MS}ms 后点第 2 次招财`);
+            Utils.log('info', `    ⏳ 等 ${GOLD_FREE_GAP_MS}ms 后重测按钮状态`);
             await Utils.sleep(GOLD_FREE_GAP_MS);
+            // 关键：点第 2 次之前重测。变 paid 就停（用户口径「变成招财就停止算完成」）。
+            let st2 = null;
+            for (let k = 1; k <= GOLD_STATE_TRIES; k++) {
+              st2 = ctx.vision.goldButtonState();
+              Utils.log('info', `    🔍 按钮状态复测 ${k}/${GOLD_STATE_TRIES}：${st2.state} —— ${st2.msg}`);
+              if (st2.state !== 'unknown') break;
+              if (k < GOLD_STATE_TRIES) await Utils.sleep(GOLD_STATE_RETRY_MS);
+            }
+            if (!st2 || st2.state !== 'free') {
+              // 已变 paid（正常：免费次数用完）→ 停止，算完成。
+              // 仍 unknown（异常）→ 也不能盲点，停下来记失败。
+              if (st2 && st2.state === 'paid') {
+                Utils.log('info', `    ✓ 按钮已变「招财」→ 停止点击，本任务完成（共点 ${clicks} 次）`);
+                ctx.stepResult(true);
+              } else {
+                Utils.log('warn', `    ✗ 第 2 次点击前状态无法确认 → 不盲点，记失败`);
+                ctx.stepResult(false);
+                await ctx.captureFailure(-1, '招财-第2次点击前状态未知');
+              }
+              break;
+            }
           }
           try {
             await ctx.op.clickNatural(GOLD_FREE_X, GOLD_FREE_Y, null, '免费招财#' + i);
+            clicks++;
             Utils.log('info', `    💰 免费招财 ${i}/2 @(${GOLD_FREE_X},${GOLD_FREE_Y})`);
+            ctx.stepResult(true);
           } catch (e) {
             Utils.log('warn', `    ⚠ 免费招财#${i} 点击失败：${(e && e.message) || e}`);
+            ctx.stepResult(false);
+            await ctx.captureFailure(-1, `招财-第${i}次点击失败`);
           }
-          ctx.stepResult(true);
         }
+
         await Utils.sleep(1000);   // 等招财动画/按钮刷新后再返回
         await ctx.tap(COORDS.collect.goldBack, null, '返回主界面');
         await ctx.home();
