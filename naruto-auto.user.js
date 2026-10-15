@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.66
+// @version      0.6.67
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.66'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.67'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -2400,6 +2400,20 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
 
         for (const [key, probe] of Object.entries(PROBES)) {
           if (probe.dynamic) continue;                       // 动态探针走专用检测器
+          // ★ v0.6.67：跳过**非 color 型**探针。
+          //  这个循环按约定假设「每个探针都是一个 avg 色距判据」，于是无条件读 probe.color.r。
+          //  但 PROBES 里还有一类探针是**按像素占比**判定的（如 goldFreeNow 用 brightMin、
+          //  goldPaidNow 用 darkMin）——它们没有 color 字段，走到这里就 `undefined.r` 抛异常，
+          //  被下面的 catch 兜住 ⇒ **整轮场景判定作废**（out.error 被赋值）。
+          //
+          //  v0.6.66 实测踩坑：加了两个招财占比探针后，场景识别**每一轮**都抛
+          //  `Cannot read properties of undefined (reading 'r')`，主界面永远判不出来
+          //  （日志：`首判=未知 → 复检=未知` → `改用盲按返回` → `未能确认回到主界面`）。
+          //  所有任务集体退化成盲按空转，连「赠送体力」都只是蒙对的**假成功**。
+          //
+          //  这里显式按 color 存在与否分流，而不是给占比探针补一个假 color —— 后者只是
+          //  掩盖问题（match() 对它们返回的结论本身无意义，还会污染 out.hits）。
+          if (!probe.color) continue;
           const m = this.vision.match(probe);
           out.hits[key] = m;
           if (verbose) {
@@ -2437,6 +2451,13 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
         out.error = e.message;
         this.vision.lastError = e.message;
         this.vision.stats.errors++;
+        // ★ v0.6.67：场景检测整体抛异常是**严重**故障——它不会让某一个探针失效，
+        //  而是让**整轮判定作废**（out.hits 停留在空对象，所有任务同时失去视觉能力）。
+        //  v0.6.66 的招财探针事故就是这样：日志里只有下游的「首判=未知 → 复检=未知」，
+        //  真正的原因（异常文本）要翻到上面几十行才看得到，很容易被当成「探针没标定好」。
+        //  这里把异常原文抬到日志里，并明确点是**框架级**问题而非标定问题。
+        Utils.log('error', `❌ [场景检测异常] ${e.message} —— 这是框架级故障，本轮场景判定已作废` +
+          `（不是探针标定问题）。若为 "reading 'r'"，通常是 PROBES 里新增了没有 color 字段的探针。`);
       }
 
       this.hits = out.hits;

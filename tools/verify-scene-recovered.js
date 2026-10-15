@@ -1,4 +1,6 @@
-// 诊断：ask.html 上到底有哪些元素？为什么找不到「安装」按钮？
+// v0.6.67 验证：场景检测是否恢复。
+// 事故期间 detect() 每轮抛异常 → scene 恒为 other、error 非空。
+// 修复后应能正常返回场景，且 error 为空。
 const http = require('http');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const get = (p) => new Promise((res, rej) => {
@@ -17,28 +19,25 @@ function conn(u) {
 }
 (async () => {
   const l = await get('/json/list');
-  const asks = l.filter(t => t.url.includes('ask.html'));
-  console.log('ask.html 数量: ' + asks.length);
-  if (!asks.length) {
-    console.log('--- 当前所有页面 ---');
-    l.filter(t => t.type === 'page').forEach(t => console.log('  [' + t.title + '] ' + t.url.slice(0, 100)));
-    return;
-  }
-  const t = asks[asks.length - 1];
-  console.log('目标: ' + t.url.slice(0, 90));
+  const t = l.find(x => x.url.includes('start.qq.com/game'));
+  if (!t) { console.log('未找到游戏页'); return; }
   await put('/json/activate/' + t.id);
   await sleep(800);
   const { ws, send } = await conn(t.webSocketDebuggerUrl);
+
   const r = await send('Runtime.evaluate', {
-    expression: `(() => {
-      const all = [...document.querySelectorAll('*')];
-      const inputs = [...document.querySelectorAll('input,button,a')].map(x => ({
-        tag: x.tagName, type: x.type || '', id: x.id || '',
-        val: (x.value || '').slice(0, 40), txt: (x.innerText || '').slice(0, 40),
-        vis: !!(x.offsetWidth || x.offsetHeight)
-      }));
-      return JSON.stringify({ ready: document.readyState, url: location.href.slice(0, 80), n: all.length, inputs }, null, 1);
-    })()`, returnByValue: true
+    expression: `(async () => {
+      const a = window.__narutoAuto;
+      // 连测 3 次，确认稳定（不是碰巧某一次不抛）
+      const runs = [];
+      for (let i = 0; i < 3; i++) {
+        const d = a.scenes.detect(false);
+        runs.push({ scene: d.scene, byProbe: d.byProbe || null, error: d.error || null,
+                    bright: d.brightness, hits: Object.keys(d.hits || {}).length });
+        await new Promise(z => setTimeout(z, 700));
+      }
+      return JSON.stringify({ runs, visionLastError: a.vision.lastError || null, stats: a.vision.stats }, null, 1);
+    })()`, returnByValue: true, awaitPromise: true
   });
   console.log(r.result.result.value);
   ws.close();
