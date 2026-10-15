@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.67
+// @version      0.6.68
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.67'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.68'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -3880,17 +3880,50 @@ async function dragScene(ctx, dir) {
       return { ok: dark >= SECRET_REALM_DIM_NEED, dark, total: SECRET_REALM_DIM_AREAS.length, lumas };
     }
 
-    /** 点掉秘境退出确认弹窗。返回是否真的点了。 */
+    /** 点掉秘境退出确认弹窗。返回是否真的点了。
+     *
+     *  ★ v0.6.68：加了**点后复检**（见 verifyExitConfirmGone）。
+     *  缺陷（2026-10-15 实跑）：这个弹窗在日志里被点了两次都没关掉 ——
+     *    17:59:14 ← goHome 第2轮 → 点击 (637,449)
+     *    17:59:50 ← goHome 第6轮 → 点击 (637,449)
+     *  相隔 36 秒又回到同一分支，说明**点一下并不保证关掉**，
+     *  而调用方无条件 `continue` 进入下一轮，于是形成"探测→点→没关→再探测→再点"的打地鼠。
+     *  现在记录点击次数并在复检失败时升级到「取消/红叉」等其它出路。 */
     async tapExitConfirm(label) {
       const d = this.detectExitConfirm();
-      if (!d.ok) return false;
+      if (!d.ok) {
+        // 弹窗已不在 ⇒ 上一次点击生效了，清掉连击计数。
+        this._exitConfirmTries = 0;
+        return false;
+      }
       const [cx, cy] = SECRET_REALM_EXIT_CONFIRM_CLICK;
+      this._exitConfirmTries = (this._exitConfirmTries || 0) + 1;
       Utils.log('info', `   ⚠ 探测到「秘境退出确认」金色【确定】(金色占比=${d.goldPct} 色距=${d.dist}` +
         ` 遮罩=${d.dimOk ? '是' : '否'}(${d.dimDark}/${d.dimTotal})` +
-        `)${label ? ' ← ' + label : ''} → 点击 (${cx},${cy})`);
+        `)${label ? ' ← ' + label : ''} → 点击 (${cx},${cy})` +
+        `${this._exitConfirmTries > 1 ? `（第 ${this._exitConfirmTries} 次，上次点击未生效）` : ''}`);
       try { Marks.circle(cx, cy, { label: '退出确认-确定', color: '241,196,15', duration: 800 }); } catch (e) {}
       await this.op.tap(cx, cy, 'delay.short');
       return true;
+    }
+
+    /** ★ v0.6.68：确认「秘境退出确认」弹窗是否真的被关掉了。
+     *
+     *  为什么需要：`tapExitConfirm()` 只负责"点"，不负责"点上没有"。
+     *  实测该弹窗存在**点了不消失**的情况（17:59:14 与 17:59:50 相隔 36 秒两次命中），
+     *  调用方若无条件 `continue`，就会同一分支反复命中 → 打地鼠，goHome 永远不收敛。
+     *
+     *  @returns {Promise<boolean>} true = 已确认消失（可以放心走下一轮）
+     */
+    async verifyExitConfirmGone(label, tries = 3, pollMs = 500) {
+      for (let k = 0; k < tries; k++) {
+        await Utils.sleep(pollMs);
+        Runtime.check();
+        if (!this.detectExitConfirm().ok) return true;
+      }
+      Utils.log('warn', `   ⚠ [${label}] 点了「确定」但弹窗仍在（${tries} 次复检仍未消失）` +
+        ` → 改为盲按返回/红叉等其它出路，避免在同一分支反复点击`);
+      return false;
     }
 
     async goHome(timeout) {
@@ -3949,8 +3982,12 @@ async function dragScene(ctx, dir) {
         //   它的按钮不在右上角，SCENE.POPUP 的三个关闭探针全打不到，
         //   不先点掉就会退化成「盲按返回」→ 卡死（用户 2026-09-21 报）。
         if (await this.tapExitConfirm('goHome 第' + (i + 1) + '轮')) {
-          await Utils.sleep(settleMs);
-          continue;
+          // ★ v0.6.68：点完必须复检是否真关掉。连续点不掉时不再 `continue`
+          //   （否则同一分支反复命中 → 打地鼠），改为落到下面的盲按返回。
+          if (await this.verifyExitConfirmGone('goHome 第' + (i + 1) + '轮')) {
+            await Utils.sleep(settleMs);
+            continue;
+          }
         }
 
         if (scene === SCENE.POPUP) { await this.dismissOnce(); continue; }
@@ -3981,8 +4018,10 @@ async function dragScene(ctx, dir) {
             (pm ? ` mailNav d=${Math.round(pm.dist)}/${pm.tol}${pm.ok ? '✅' : '❌'}` : ''));
         }
         if (await this.tapExitConfirm('goHome 复检后')) {
-          await Utils.sleep(settleMs);
-          continue;
+          if (await this.verifyExitConfirmGone('goHome 复检后')) {
+            await Utils.sleep(settleMs);
+            continue;
+          }
         }
         if (scene === SCENE.POPUP) { await this.dismissOnce(); continue; }
         if (scene === SCENE.LOADING) { await Utils.sleep(settleMs); continue; }
@@ -4769,13 +4808,54 @@ async function dragScene(ctx, dir) {
           }
         }
 
-        // 键盘/点击辅助开启就发点：⚠ 不能限定 scene === BATTLE —— 战斗探针（沙地色摇杆/金技能钮）
-        // 是按某张地图实测的，换个地图就判不出 BATTLE，会导致 15s 后一次都不点（用户看到"没反应"）。
-        // 只排除已判定的结算/主界面（那两种情况上面已 return）+ 横幅观察窗（_holdUntil，
-        // 那时已确认结算、不该再连点）。v0.6.18 起不再看「画面静止」——
-        // 用户口径「中间直接全部连点器就可以了」，静止与否都继续连招。
+        // 键盘/点击辅助开启就发点。
+        //
+        // ★ v0.6.68 改为**白名单**：只在确认处于战斗画面时连点。
+        //
+        //  历史（必须保留的教训，别退回去）：v0.6.18 时期不敢限定 `scene === BATTLE`，
+        //  因为战斗探针（沙地色摇杆/金技能钮）是按某张地图实测的，换个地图判不出 BATTLE，
+        //  会导致 15s 后一次都不点（用户看到"没反应"）。所以当时只排除结算/主界面。
+        //
+        //  但那条"宽进"策略有一个致命副作用，2026-10-15 实跑暴露：
+        //  它把 **OTHER（未知页）也当成战斗中**，于是在"根本没进战斗"的画面上疯狂连点。
+        //  实测 17:59:03~17:59:14 这 11 秒里点了几十下，坐标在 j/k/i 三组之间循环，
+        //  而当时日志明确写着「画面不在准备界面」——即连点宏在未知页面上瞎点。
+        //  后果：① 点开了「木叶赛事」等无关页面（用户截图佐证）
+        //        ② 点开「秘境退出确认」弹窗 → goHome 卡住 → 反复重导航
+        //        ③ 把状态污染给后续排队任务（一乐拉面就是这么被牵连失败的）
+        //  一句话：**宽进策略会把"识别错误"放大成"到处乱点"**，而乱点会污染全局。
+        //
+        //  折中（既防乱点、又不丢换地图的能力）——「**先宽后严**」：
+        //   · 开打后的 GRACE 窗口内：维持旧的宽进行为（只排除结算/主界面）。
+        //     这段窗口覆盖了"换地图导致 BATTLE 判不出"的情况，连点照常，不会出现"没反应"。
+        //   · 窗口过后：收紧为白名单，只有确认 BATTLE（或 LOADING 过场）才继续点。
+        //     此时若还判不出 BATTLE，说明**大概率根本不在战斗里**，必须停手。
+        //  这样"换地图判不出 BATTLE"最多损失 GRACE 之后的连点，
+        //  而不会像以前那样在无关页面上无上限地乱点。
+        const combatElapsed = this._combatT0 ? (Date.now() - this._combatT0) : Infinity;
+        const inGrace = combatElapsed < COMBAT_MACRO_GRACE_MS;
+        const sceneIsBattle = this._lastScene === SCENE.BATTLE || this._lastScene === SCENE.LOADING;
         const stillFighting = !this._holdUntil && this._lastScene !== SCENE.BATTLE_END
-          && this._lastScene !== SCENE.HOME;
+          && this._lastScene !== SCENE.HOME
+          && (inGrace || sceneIsBattle);
+        if (!stillFighting && this.config.get('battle.keyAssist')) {
+          // 只在**从可点转为不可点**的那一拍记一次，避免刷屏。
+          if (this._macroWasOn !== false) {
+            this._macroWasOn = false;
+            const why = this._holdUntil ? '处于结算观察窗'
+              : (this._lastScene === SCENE.BATTLE_END ? '判定已结算'
+                : (this._lastScene === SCENE.HOME ? '判定在主界面'
+                  : `场景=${this._lastScene} 且已超出开打宽限 ${COMBAT_MACRO_GRACE_MS}ms`));
+            Utils.log('warn', `    ⏸ 连点宏停手（${why}）—— 不在战斗画面不发点击，防止在未知页面上乱点`);
+          }
+        } else if (stillFighting) {
+          if (this._macroWasOn === false) {
+            this._macroWasOn = true;
+            Utils.log('info', `    ▶ 连点宏恢复（场景=${this._lastScene}` +
+              `${inGrace ? `，开打宽限内 ${Math.round(combatElapsed)}ms` : '，已确认战斗画面'}）`);
+          }
+          this._macroWasOn = true;
+        }
         const comboGap = (this.config.get('battle.keyAssist') && stillFighting) ? (await this.combatStep()) : 0;
         await Utils.sleep(comboGap || (due ? 150 : 200));
       }
@@ -6286,6 +6366,20 @@ const SECRET_REALM_TICKET_DONE_EXIT = [[1224, 33], [636, 455]];
    *  取值依据：单次 realmNavGated 内部已自带 2 次尝试，故 2 次连续失败
    *    = 实际 4 次「点秘境入口」都没进去 —— 足够判定是真的进不去。 */
   const NAV_FAIL_STREAK_FAIL = 2;
+  /** ★ v0.6.68：连点宏的「开打宽限」时长（ms）。
+   *
+   *  作用：连点宏从「只排除结算/主界面」的宽进策略，收敛为「确认 BATTLE 才点」的白名单。
+   *  但直接白名单会踩 v0.6.18 记录的老坑 —— 战斗探针按某张地图实测，换地图判不出
+   *  BATTLE，导致一次都不点（用户看到"没反应"）。故用本宽限做过渡：
+   *  开打后的这段时间内维持宽进（保住换地图的能力），之后收紧为白名单。
+   *
+   *  取值依据：实测 17:59 那次「战斗开始→首次场景判定」在数秒内完成，
+   *  而开场过场/加载通常 <10s。取 15s 与 v0.6.18 注释里提到的 15s 空转阈值一致，
+   *  足以覆盖「地图陌生导致 BATTLE 迟迟判不出」的情形。
+   *
+   *  ⚠ 语义：宽限期内**允许**在 BATTLE 之外点击（继承旧行为，不是 bug）。
+   *    超过宽限期仍非 BATTLE/LOADING ⇒ 认为根本不在战斗，停手防乱点。 */
+  const COMBAT_MACRO_GRACE_MS = 15000;
   /** ★ v0.6.65：内存里最多保留多少张失败现场截图。
    *  只存内存（不自动落盘）—— 见 TaskContext._grabShot 的说明。
    *  取 6 与单任务抓取上限一致；超出丢最旧的，防止长跑累积占内存。 */
@@ -8761,7 +8855,29 @@ const MissionHall = {
           for (let navTry = 1; navTry <= 2; navTry++) {
             if (navTry > 1) {
               Utils.log('warn', `   ↻ [${tag}] 第 ${navTry} 次导航尝试（上次没进第 2 场景）`);
-              await ctx.home();
+              // ★ v0.6.68：回主界面**必须确认成功**才继续往下点入口。
+              //   缺陷（2026-10-15 实跑）：原来这里直接 `await ctx.home()` 不看结果，
+              //   于是 18:06:47 日志已经写着「未能确认回到主界面（最后场景=其它页）」，
+              //   18:07:00 却照样去点秘境入口 —— **在一个未知画面上盲点**，
+              //   点到什么全凭运气。这就是"木叶赛事"等无关页面被点开、
+              //   以及一连串「没看到右上角红叉」的直接原因。
+              //   ⚠ 不能把"回不去"当成导航失败来记（会误伤偶发降级，见 v0.6.65 说明），
+              //     这里只是**不继续**，让循环自然走到"放弃导航"分支。
+              const hr = await ctx.home();
+              if (!hr || hr.sc !== SCENE.HOME) {
+                Utils.log('warn', `   ⚠ [${tag}] 回主界面未确认（场景=${hr && hr.sc}）` +
+                  ` → **不继续点秘境入口**（在未知画面上点会误触其它玩法）`);
+                continue;
+              }
+            } else {
+              // 首次导航前同样要确认在主界面：否则「拖到最右并点秘境入口」
+              // 那两下可能落在完全无关的页面上。
+              const hr0 = await ctx.home();
+              if (!hr0 || hr0.sc !== SCENE.HOME) {
+                Utils.log('warn', `   ⚠ [${tag}] 起点不在主界面（场景=${hr0 && hr0.sc}）` +
+                  ` → 先不点秘境入口，回主界面重来`);
+                continue;
+              }
             }
             await ctx.replaySeq(SECRET_REALM_NAV_ENTRY, { label: `[${tag}] 导航①拖到最右并点秘境入口` });
             await Utils.sleep(SECRET_REALM_ENTRY_SETTLE_MS);   // 等第 2 场景（右上角红叉）渲染
@@ -8850,6 +8966,30 @@ const MissionHall = {
           if (!prep.ok) {
             Utils.log('warn', `  ⚠ 未探测到「秘境准备界面」图标（score=${prep.score}，轮询 ${prep.tries} 次 / 等满 ${prep.ms}ms）` +
               ` → 画面不在准备界面，回主界面重导航（不读券、不当成券=0）`);
+            // ★ v0.6.68：先分清「战斗还没结束」和「真的不在准备界面」。
+            //
+            //  缺陷（2026-10-15 实跑，两张用户截图佐证）：
+            //    18:00:32 开打 → 18:06:07 `⚠ 等待战斗超时，继续走结算清理`
+            //    → 18:06:27 `未探测到准备界面图标 score=83.7` → 触发整轮重导航。
+            //  但两张失败截图（烈炎 00:08:56 / 毒风 00:02:57）显示**战斗还在进行中**，
+            //  计时器还在倒数 —— 即"结算清理"根本没把人带出战斗。
+            //  于是脚本基于「我已经打完了」这个**错误前提**去判准备界面、判主界面、
+            //  点秘境入口，一路全错：这正是后面「没看到右上角红叉」连续失败、
+            //  以及把无关页面点开的根源。
+            //
+            //  这里在重导航之前先确认「是否仍在战斗」。仍在战斗 ⇒ 本轮不该继续，
+            //  直接如实收尾（本场按失败计），而不是在战斗画面上瞎点。
+            //  ⚠ 判据用 BATTLE 场景 + 秘境战斗专属特征（SECRET_REALM_EXIT_CONFIRM 等）
+            //    的组合，避免"换地图判不出 BATTLE"导致误判 —— 所以只在
+            //    **明确判出 BATTLE** 时才拦，判不出时维持原有重导航行为。
+            const inFight = ctx.scenes.detect(false).scene === SCENE.BATTLE;
+            if (inFight) {
+              Utils.log('error', `  ✗ 仍在战斗画面却已判定"不在准备界面" —— ` +
+                `本场应按失败收尾，**不做重导航**（重导航会在战斗中乱点，污染后续任务）`);
+              ctx.captureFailure(-1, `秘境战斗未结束[准备图标 score=${prep.score}]`);
+              ctx.stepResult(false);
+              break;
+            }
             try {
               await ctx.home();
               await realmNavGated('不在准备界面→重导航');
