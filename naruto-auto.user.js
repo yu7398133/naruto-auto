@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.72
+// @version      0.6.73
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.72'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.73'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1230,6 +1230,7 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
       this._frame = null;
       this._frameTs = 0;
       this._prevSig = null;
+      this._hpBarHitAt = 0;     // v0.6.73 血条闩锁：最近一次「两侧同时为红」的时刻
       this.stats = { captures: 0, errors: 0 };
     }
 
@@ -1554,6 +1555,16 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
     static get CLS_DARK() { return (r, g, b) => r < 80 && g < 80 && b < 80; }
     /** 分类器：金色按钮底（用于确认「确实在招财页」） */
     static get CLS_GOLD() { return (r, g, b) => r > 200 && g > 140 && b < 130; }
+    /** 分类器：战斗血条纯色 (240,64,32)，欧氏距离 ≤ HPBAR_TOL（v0.6.73）。
+     *  用欧氏距离而非分量差，是因为实测主色是一个**集中色块**（该区 52%），
+     *  而不是散色；主界面同位置实测命中 0.0%，故无需更宽松的判据。 */
+    static get CLS_HPBAR_RED() {
+      const R = HPBAR_REF.r, G = HPBAR_REF.g, B = HPBAR_REF.b, T2 = HPBAR_TOL * HPBAR_TOL;
+      return (r, g, b) => {
+        const dr = r - R, dg = g - G, db = b - B;
+        return dr * dr + dg * dg + db * db <= T2;
+      };
+    }
 
     /**
      * 招财按钮状态识别（v0.6.66）——正反双判据。
@@ -1582,6 +1593,74 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
       }
       return { state: 'unknown', bright, dark, msg: `两态判据都不命中（亮黄 ${bright.toFixed(1)}% < ${PROBES.goldFreeNow.brightMin}% 且 深色 ${dark.toFixed(1)}% < ${PROBES.goldPaidNow.darkMin}%）⇒ 场景错误：不在招财页或页面未加载完` };
     }
+
+    /**
+     * 顶部血条 HUD 战斗判据（v0.6.73）。
+     *
+     *  用户口径（2026-10-16 逐字）：
+     *    「在左边血条的最左和右边血条最右，肯定有两边都是红色的，
+     *      因为如果有一方不是，那么意味着一方失败了，这一局也就结束了」
+     *    「顶部血条hud注意血量会减少，会空血，不过条状都在」
+     *
+     *  为什么按「最左/最右端」取窗：血条是从各自一侧向外消耗的
+     *    （左条从左端起、右条从右端起），故**两端恒为红条起点**；
+     *    取整条会被残血时的暗底拉平均值，取两端则不受血量多少影响。
+     *    这正对应用户「空血也在」的约束：只看红色**存在**，不看填充量。
+     *
+     *  ⚠ 单帧盲区：大招白光会**物理遮盖**血条（实测该帧左端 0.0%）。
+     *    故本方法只给「本帧两侧是否同时为红」，**不要**直接拿它当停手条件；
+     *    停手条件必须走 `hpBarCombatLatched()`（带时间闩锁）。
+     *
+     *  @returns {{both:boolean, L:number, R:number, msg:string}} 同步方法，勿 await
+     */
+    hpBarBothRed() {
+      try {
+        const L = this.ratioIn(HPBAR_LEFT_EDGE, VisionCore.CLS_HPBAR_RED).pct;
+        const R = this.ratioIn(HPBAR_RIGHT_EDGE, VisionCore.CLS_HPBAR_RED).pct;
+        const both = (L >= HPBAR_HIT_PCT && R >= HPBAR_HIT_PCT);
+        return {
+          both, L: +L.toFixed(1), R: +R.toFixed(1),
+          msg: `左端 ${L.toFixed(1)}% / 右端 ${R.toFixed(1)}%（阈 ${HPBAR_HIT_PCT}%）`
+            + (both ? ' ⇒ 两侧同时为红' : ' ⇒ 未见双侧红条'),
+        };
+      } catch (e) {
+        // 视觉不可用：返回 both=false 而**不置位**闩锁 —— 宁可不判战斗，
+        // 也不要凭异常去续期连点（那会退化成 v0.6.68 之前"到处乱点"的老毛病）。
+        return { both: false, L: 0, R: 0, msg: '视觉不可用：' + e.message };
+      }
+    }
+
+    /**
+     * 带**时间闩锁**的战斗判定（v0.6.73）—— 连点宏唯一应使用的入口。
+     *
+     *  语义：最近 `HPBAR_LATCH_MS`(8s) 内**曾**出现「两侧同时为红」即视为战斗中。
+     *
+     *  为什么必须有闩锁（v0.6.73 要修的病）：
+     *    大招白光帧实测左端 0.0%（血条被特效遮盖），单帧判据会瞬间变 false；
+     *    而 v0.6.68 的停手逻辑正是「非 BATTLE 就停」，于是整场不再出刀。
+     *    闩锁让"一帧读不到"不再等于"战斗结束"。
+     *
+     *  保守性质（重要）：闩锁只能让连点宏**多打**，不能让它在别处乱点 ——
+     *    唯一置位来源（两侧血条同为红）是战斗独有特征（主界面实测 0.0%/0.0%）。
+     *    且调用方仍以 `_holdUntil`（结算观察窗）/ `BATTLE_END` / `HOME` 优先，
+     *    故结算页不会被闩锁拖着继续点。
+     *
+     *  @returns {{latched:boolean, both:boolean, agedMs:number|null, L:number, R:number, msg:string}}
+     */
+    hpBarCombatLatched() {
+      const r = this.hpBarBothRed();
+      const now = Date.now();
+      if (r.both) this._hpBarHitAt = now;                    // 命中即续期
+      const aged = this._hpBarHitAt ? (now - this._hpBarHitAt) : null;
+      const latched = aged != null && aged < HPBAR_LATCH_MS;
+      return {
+        latched, both: r.both, agedMs: aged, L: r.L, R: r.R,
+        msg: `${r.msg}；闩锁 ${latched ? `ON（${aged}ms 前命中，窗 ${HPBAR_LATCH_MS}ms）` : 'OFF'}`,
+      };
+    }
+
+    /** 清除血条闩锁。进场/换局时调用，避免上一场的命中余温把新画面误判成战斗中。 */
+    hpBarResetLatch() { this._hpBarHitAt = 0; }
 
     /** 匹配一个探针 {area, color, tol, minStd, maxStd} */
     match(probe) {
@@ -4420,6 +4499,9 @@ async function dragScene(ctx, dir) {
       // 0.5.78：本场起点（静止落判的时间闸）+ 横幅时间戳/观察窗状态
       this._fightStart = Date.now(); this._bannerAt = 0; this._holdUntil = 0; this._holdBlack = false;
       this._stillSince = 0;   // 0.5.79：本场「画面开始持续静止」的时间戳（0 = 画面在动）
+      // v0.6.73：本场起点清空血条闩锁 —— 否则上一场的命中余温（8s 窗）会把
+      // 新一局开头那几秒的「还没进战斗」误判成战斗中，进而在准备界面出刀。
+      this.vision.hpBarResetLatch();
       this._bannerMuteUntil = 0;
       // v0.6.36：「第X回」战斗中闸门 —— 每场重新起算（计数/日志各重置）
       //   _rbSeen：本场是否**已确认进过战斗**（未确认前不计数，避免开场误判）
@@ -4911,9 +4993,19 @@ async function dragScene(ctx, dir) {
         const combatElapsed = this._combatT0 ? (Date.now() - this._combatT0) : Infinity;
         const inGrace = combatElapsed < COMBAT_MACRO_GRACE_MS;
         const sceneIsBattle = this._lastScene === SCENE.BATTLE || this._lastScene === SCENE.LOADING;
+        // ── ★ v0.6.73：血条 HUD 闩锁（修「战斗中最后不打了」）─────────────────
+        //  病根：BATTLE 场景判据要求 battleStick+battleSkill 两个固定色探针同帧命中，
+        //  大招白光帧二者全灭 ⇒ 判不出 BATTLE ⇒ 15s 后停手 ⇒ 整场不再出刀
+        //  （日志 2026-10-16T08-35-48 全程「场景=battle」出现 0 次）。
+        //  血条判据用**几何恒定**的顶部血条（用户：「会空血，不过条状都在」），
+        //  不受地图/特效/血量影响；再配 8s 闩锁消化白光帧的单帧丢失。
+        //  ⚠ 每次 detect 后（300ms 节流）才测一次，与场景判定同频，不额外开销。
+        const hpLatch = (due && !sceneIsBattle)
+          ? this.vision.hpBarCombatLatched()
+          : null;
         const stillFighting = !this._holdUntil && this._lastScene !== SCENE.BATTLE_END
           && this._lastScene !== SCENE.HOME
-          && (inGrace || sceneIsBattle);
+          && (inGrace || sceneIsBattle || !!(hpLatch && hpLatch.latched));
         if (!stillFighting && this.config.get('battle.keyAssist')) {
           // 只在**从可点转为不可点**的那一拍记一次，避免刷屏。
           if (this._macroWasOn !== false) {
@@ -4921,14 +5013,16 @@ async function dragScene(ctx, dir) {
             const why = this._holdUntil ? '处于结算观察窗'
               : (this._lastScene === SCENE.BATTLE_END ? '判定已结算'
                 : (this._lastScene === SCENE.HOME ? '判定在主界面'
-                  : `场景=${this._lastScene} 且已超出开打宽限 ${COMBAT_MACRO_GRACE_MS}ms`));
+                  : `场景=${this._lastScene} 且已超出开打宽限 ${COMBAT_MACRO_GRACE_MS}ms`
+                    + (hpLatch ? `；血条闩锁未在（${hpLatch.msg}）` : '')));
             Utils.log('warn', `    ⏸ 连点宏停手（${why}）—— 不在战斗画面不发点击，防止在未知页面上乱点`);
           }
         } else if (stillFighting) {
           if (this._macroWasOn === false) {
             this._macroWasOn = true;
             Utils.log('info', `    ▶ 连点宏恢复（场景=${this._lastScene}` +
-              `${inGrace ? `，开打宽限内 ${Math.round(combatElapsed)}ms` : '，已确认战斗画面'}）`);
+              `${inGrace ? `，开打宽限内 ${Math.round(combatElapsed)}ms` : '，已确认战斗画面'}`
+              + `${!inGrace && !sceneIsBattle && hpLatch && hpLatch.latched ? `，血条闩锁生效（${hpLatch.msg}）` : ''}）`);
           }
           this._macroWasOn = true;
         }
@@ -6456,6 +6550,47 @@ const SECRET_REALM_TICKET_DONE_EXIT = [[1224, 33], [636, 455]];
    *  ⚠ 语义：宽限期内**允许**在 BATTLE 之外点击（继承旧行为，不是 bug）。
    *    超过宽限期仍非 BATTLE/LOADING ⇒ 认为根本不在战斗，停手防乱点。 */
   const COMBAT_MACRO_GRACE_MS = 15000;
+  // ── v0.6.73：顶部血条 HUD 战斗判据（用户口径 + 实测）──────────────────
+  //
+  //  用户 2026-10-16 口径（逐字）：
+  //    「在左边血条的最左和右边血条最右，肯定有两边都是红色的，
+  //      因为如果有一方不是，那么意味着一方失败了，这一局也就结束了」
+  //    「顶部血条hud注意血量会减少，会空血，不过条状都在」
+  //
+  //  为什么需要它：v0.6.68 的「先宽后严」把停手条件绑定在 SceneDetector 的
+  //  BATTLE 上，而 BATTLE 规则要求 battleStick + battleSkill **两个固定色探针
+  //  在同一帧同时命中**（PROBES L2340/L2341，min:2）。实测大招白光帧下这两个
+  //  探针全灭（battleStick dist=164 / tol=45）⇒ 整场判不出 BATTLE ⇒ 15s 后
+  //  停手 ⇒ 后续几分钟一次不出刀。日志 2026-10-16T08-35-48 佐证：全程
+  //  场景=battle 出现 0 次。
+  //
+  //  实测几何（1920x1080 截图坐标，脚本坐标×1.5）：
+  //    左血条红段 x≈244..586，右血条红段 x≈1670..1740，条体 y≈84..102
+  //    ⇒ 取「左条最左端」与「右条最右端」两个窄采样窗（见下方常量）。
+  //
+  //  实测颜色：战斗血条纯色 (240,64,32)，单一色块占该区 52%（游戏 UI 纯色填充）。
+  //    对照：主界面同位置命中 0.0% / 0.0%（用户洞察「主界面的红和血条的红不同色」
+  //    经原始 PNG 复算成立）。故「欧氏距离 ≤ HPBAR_TOL 的像素占比 ≥ 阈值」
+  //    可干净区分二者，且不依赖血量多少（只看是否有红条，不看填充量）。
+  //
+  //  ⚠ 已知盲区：白光/大招特效会**物理遮盖**血条（实测该帧左端 0.0%）。
+  //    故单帧判据必须配「时间闩锁」——见 HPBAR_LATCH_MS。
+  /** 战斗血条参考纯色（实测自原始截图）。 */
+  const HPBAR_REF = { r: 240, g: 64, b: 32 };
+  /** 与参考色的欧氏距离容差。实测战斗帧该区内同色占比 52%，主界面 0%。 */
+  const HPBAR_TOL = 48;
+  /** 采样窗（1920x1080 截图坐标）。 */
+  const HPBAR_LEFT_EDGE = [248, 84, 302, 102];    // 左血条「最左端」
+  const HPBAR_RIGHT_EDGE = [1688, 84, 1746, 102]; // 右血条「最右端」
+  /** 两侧同时命中的占比阈值。待真机回收后定稿（当前为离线 3 样本的保守值）。 */
+  const HPBAR_HIT_PCT = 15;
+  /** ★ 时间闩锁窗口（用户 2026-10-16 定为 8s，原提案 5s 被否）。
+   *  语义：最近 HPBAR_LATCH_MS 内**曾**出现「两侧同时为红」即视为战斗中。
+   *  作用：白光帧读到 0% 时不立刻停手，避免整场不出刀。
+   *  保守性质：闩锁只可能让连点宏**多打**，不会让它在别处乱点 ——
+   *  因为唯一置位来源（两侧血条同时为红）是战斗独有的（主界面实测 0.0/0.0）。
+   *  且 `_holdUntil`（结算观察窗）/ `BATTLE_END` / `HOME` 优先级**高于**闩锁。 */
+  const HPBAR_LATCH_MS = 8000;
   /** ★ v0.6.65：内存里最多保留多少张失败现场截图。
    *  只存内存（不自动落盘）—— 见 TaskContext._grabShot 的说明。
    *  取 6 与单任务抓取上限一致；超出丢最旧的，防止长跑累积占内存。 */

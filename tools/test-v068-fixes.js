@@ -36,8 +36,12 @@ function bodyOf(sig) {
 
 console.log('=== ① 连点宏白名单化（C）===');
 t('存在 COMBAT_MACRO_GRACE_MS 常量', has(/const COMBAT_MACRO_GRACE_MS\s*=\s*\d+/));
-t('stillFighting 纳入 inGrace || sceneIsBattle',
-  has(/const stillFighting[\s\S]{0,260}\(inGrace \|\| sceneIsBattle\)/),
+// v0.6.73：本断言原为字面量 `\(inGrace \|\| sceneIsBattle\)`，会随
+// 「往这个条件里 OR 上血条闩锁」（v0.6.73 的正当扩展）而误报。
+// 改为断言**意图**：宽限期与战斗场景判定必须仍是 stillFighting 的组成部分。
+t('stillFighting 仍以 inGrace / sceneIsBattle 为闸门',
+  has(/const stillFighting[\s\S]{0,400}inGrace[\s\S]{0,200}sceneIsBattle/) ||
+  has(/const stillFighting[\s\S]{0,400}sceneIsBattle[\s\S]{0,200}inGrace/),
   '白名单/宽限逻辑缺失');
 t('inGrace 由 combatElapsed 与 GRACE 比较得出',
   has(/const inGrace = combatElapsed < COMBAT_MACRO_GRACE_MS/));
