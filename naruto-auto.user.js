@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.69
+// @version      0.6.70
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.69'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.70'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -1917,6 +1917,82 @@ const ARENA_PANEL_DIM_NEED = 4;        // 5 块里至少 4 块暗 → 判定面�
         return { phase, dark: darkN, rows };
       } catch (e) {
         Utils.log('warn', `   🧪[探针] 取证异常：${e.message}`);
+        return null;
+      }
+    }
+
+    /** [临时探针 v0.6.69] 「跳过结算点 k 位」前后取证 —— 用完即删。
+     *
+     *  要回答的问题（用户 2026-10-16 报告；不要靠推理，埋检测代码拿证据）：
+     *    忍术对战三局连续失败，唯一未达成的步骤是
+     *      「循环⑤跳过结算：点 k 位」
+     *    失败现场读数：场景=other，命中探针 backBtnX=0（完美命中）、closeX=29。
+     *    ⚠ backBtnX 是**二级页返回键**，准备界面不该有它
+     *      ⇒ 极可能「点 k」把画面点进了某个二级页（k(1137,589) 在结算/准备
+     *         画面下压着别的按钮），而不是"回到准备界面"。
+     *
+     *  但**不能只凭读数下结论** —— 必须拿到「点 k 之前」和「点 k 之后」
+     *  两个时刻的画面读数，才能判断：
+     *    · 点之前若已是 backBtnX 命中 ⇒ k 不是元凶，是更早的画面就错了；
+     *    · 点之后才出现 backBtnX    ⇒ 确认是 k 点进了二级页。
+     *
+     *  取证设计（同一批读数，两个时刻对比）：
+     *    phase='before-k' → 点 k 之前（刚识别到结算图标）
+     *    phase='after-k'  → 点 k 之后 + 1200ms（现流程等完动画的时刻）
+     *  截图由调用方（TaskContext）负责存，本方法只出读数。
+     *
+     *  ⚠ 本方法在 VisionCore 上：**没有** this.scenes / this.captureFailure
+     *    （前者在 GameOperator/TaskContext 上，后者在 TaskContext 上）。
+     *    只允许用 VisionCore 自己的成员：_fresh / match / ctx / PROBES。
+     *
+     *  @param {string} phase 'before-k' | 'after-k'
+     *  @param {number} seq   本局场序（便于对上是哪一局）
+     */
+    _probeArenaSkipK(phase, seq) {
+      try {
+        this._fresh();
+        // ⚠ 探针分两类，读法不同（本探针初版踩的坑：对着 dynamic 探针调 match()，
+        //   又去读不存在的 `.score` 字段 → 全部打成 'err'，等于没取证）：
+        //   · 普通探针（有 color）→ this.match(p) 返回 {ok, dist, tol, ...}，
+        //     **没有 score 字段**；"越小越像"的那个数叫 **dist**。
+        //   · 动态探针（probe.dynamic，如 backBtnX）→ match() 无意义，
+        //     必须走 this.findRedX(probe.detRegion)，返回 {ok, cx, cy, cluster, bbox}。
+        const pick = (key) => {
+          const p = PROBES[key];
+          if (!p) return 'n/a';
+          if (p.dynamic) {
+            try {
+              const det = this.findRedX(p.detRegion);
+              return det.ok ? `命中(聚类=${det.cluster}px)` : '未检出';
+            } catch (e) { return 'err:' + e.message; }
+          }
+          if (!p.color) return 'n/a';
+          try {
+            const m = this.match(p);
+            return `${m.dist}/${m.tol}${m.ok ? '✅' : '❌'}`;
+          } catch (e) { return 'err:' + e.message; }
+        };
+        // 9 宫格亮度：给出"画面整体长什么样"的低维指纹，
+        // 便于事后判断两次采样是不是同一屏（还是换了页）
+        const grid = [];
+        try {
+          for (let gy = 0; gy < 3; gy++) {
+            for (let gx = 0; gx < 3; gx++) {
+              const x = Math.floor(gx * 1280 / 3), y = Math.floor(gy * 720 / 3);
+              const w = Math.floor(1280 / 3), h = Math.floor(720 / 3);
+              const d = this.ctx.getImageData(x, y, w, h).data;
+              let s = 0, n = 0;
+              for (let k = 0; k < d.length; k += 4) { s += (d[k] * 77 + d[k + 1] * 151 + d[k + 2] * 28) >> 8; n++; }
+              grid.push(Math.round(s / n));
+            }
+          }
+        } catch (e) { /* 亮度失败不影响主判据 */ }
+        Utils.log('warn', `   🧪[探针·跳过结算] phase=${phase} 第${seq}局` +
+          ` 关键探针：backBtnX=${pick('backBtnX')} closeX=${pick('closeX')} friendsIcon=${pick('friendsIcon')}`);
+        Utils.log('warn', `   🧪[探针·跳过结算] 9宫格亮度(行主序 左上→右下)=[${grid.join('/')}]`);
+        return { phase, seq, grid };
+      } catch (e) {
+        Utils.log('warn', `   🧪[探针·跳过结算] 异常：${e.message}`);
         return null;
       }
     }
@@ -9703,10 +9779,18 @@ const MissionHall = {
           //   用户口径：「结算识别后 0.5s 点 k 那个位置」。
           //   ⚠ 必须先松手：holdAttack 一直按着 k，直接点等于没点。
           ctx.op.releaseHold();
+          // 🧪 [临时探针 v0.6.69] 取证 A：**点 k 之前**画面上有什么。
+          //   用途：判断 backBtnX 是不是本来就命中（那就不是 k 的锅），
+          //   还是点完 k 才出现（那就确认 k 点进了二级页）。见 _probeArenaSkipK 注释。
+          //   ⚠ label 已含「第N批第M局」，直接用它当局标识（round 不在此函数作用域）。
+          try { ctx.vision._probeArenaSkipK('before-k', label); } catch (e) {}
           await Utils.sleep(500);
           await ctx.op.clickNatural(1137, 589, null, '跳过结算（点 k 位）');
           ctx.op.releaseHold();
           await Utils.sleep(1200);            // 让结算动画/奖励浮层走完
+          // 🧪 [临时探针 v0.6.69] 取证 B：**点 k 之后**（现流程等完动画的时刻）。
+          //   与 A 对比：backBtnX 由"不命中"变成"0" ⇒ k 点进了二级页。
+          try { ctx.vision._probeArenaSkipK('after-k', label); } catch (e) {}
           return reason;
         };
 
