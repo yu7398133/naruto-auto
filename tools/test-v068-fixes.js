@@ -56,8 +56,19 @@ t('找到 realmNavGated', nav.length > 200);
 t('首次导航前校验起点在主界面', has(/起点不在主界面/));
 t('重试分支校验回主界面成功', has(/回主界面未确认/));
 t('校验用 sc !== SCENE.HOME 判据', /hr0?\.sc !== SCENE\.HOME/.test(nav) || has(/!hr0? \|\| hr0?\.sc !== SCENE\.HOME/));
-t('未确认时 continue（不继续点入口）',
-  /回主界面未确认[\s\S]{0,120}continue;/.test(nav) || /起点不在主界面[\s\S]{0,120}continue;/.test(nav));
+t('未确认时不再往下点入口',
+  // ⚠ v0.6.69 改过实现：原来用 continue 跳过，现在改为独立前置循环 + break + 记失败。
+  //   断言"用的是哪个关键字"会随重构失效 —— 这里断言**意图**：
+  //   前置校验失败后必须立刻离开当前分支（continue 或 break 皆可），
+  //   且不得落到 replaySeq（点秘境入口）那一行。
+  (() => {
+    const m = nav.match(/回主界面未确认[\s\S]{0,200}?(continue|break);/);
+    if (!m) return false;
+    const afterCheck = nav.indexOf(m[0]);
+    const clickEntry = nav.indexOf('SECRET_REALM_NAV_ENTRY');
+    return clickEntry > 0 && afterCheck < clickEntry;
+  })(),
+  '前置失败后没有及时跳出，可能仍会点入口');
 
 console.log('\n=== ③ 秘境退出确认弹窗点后复检（D）===');
 t('存在 verifyExitConfirmGone 方法', has(/async verifyExitConfirmGone\(/));

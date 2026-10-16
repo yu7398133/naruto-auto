@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.68
+// @version      0.6.69
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.68'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.69'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -8852,31 +8852,59 @@ const MissionHall = {
         //   故：连续失败达到阈值才记一次失败，成功一次即清零（见 navFailStreak）。
         let navFailStreak = 0;
         const realmNavGated = async (tag) => {
+          // ── ① 前置条件：必须确认在主界面 ───────────────────────────────────
+          //   ★ v0.6.69 修复（v0.6.68 引入的回归）：
+          //   实跑 2026-10-16 10:16:09~11 暴露 —— 秘境挑战**2 秒就报"✓ 完成"**，
+          //   一次入口都没点。日志：
+          //     ⚠ [首次导航] 起点不在主界面（场景=undefined） → 先不点秘境入口
+          //     ⚠ [首次导航] 回主界面未确认（场景=undefined） → **不继续点秘境入口**
+          //     ❌ [首次导航] 导航失败，抓取现场供事后定位
+          //     ✓ 秘境挑战 (2秒)
+          //
+          //   根因是**两种失败被混为一谈**：
+          //     · 导航失败      = 点了入口但没进第 2 场景 → 重试有意义，该累计 navFailStreak
+          //     · 前置条件失败  = 画面根本不在主界面 → **一次都没真正导航**，不是"导航失败"
+          //   v0.6.68 把前置失败也写成 `continue`，于是它白白吃掉了 navTry 的 2 次机会：
+          //     navTry=1 前置失败→continue→navTry=2 前置又失败→continue→循环结束。
+          //   而 navFailStreak++ 在循环**末尾**，根本走不到 ⇒ 停在 1，够不上阈值 2
+          //   ⇒ **一个 stepResult(false) 都没有** ⇒ Runner 判成功（谎报）。
+          //
+          //   现在把前置条件拎出循环单独做（独立重试计数），并**明确记失败**：
+          //   "回不到主界面"意味着连起点都没站稳，本任务不可能完成（用户 2026-10-16 拍板）。
+          const PREP_HOME_TRIES = 3;
+          let homeOk = false, homeLast = null;
+          for (let t = 1; t <= PREP_HOME_TRIES && !homeOk; t++) {
+            const hr = await ctx.home();
+            // ⚠ ctx.home() 在 goHome 超时时会返回 `false`（不是 {sc}），
+            //   此时 hr.sc 是 undefined —— 要显示成人话，不能把 undefined 直接抛给用户。
+            homeLast = (hr && typeof hr === 'object' && 'sc' in hr) ? hr.sc : '(goHome 无返回，多半是超时)';
+            if (hr && typeof hr === 'object' && hr.sc === SCENE.HOME) { homeOk = true; break; }
+            Utils.log('warn', `   ⚠ [${tag}] 回主界面未确认（场景=${homeLast}，第 ${t}/${PREP_HOME_TRIES} 次）` +
+              ` → 不点秘境入口（在未知画面上点会误触其它玩法）`);
+            if (t < PREP_HOME_TRIES) await Utils.sleep(1500);   // 给画面一点时间再复检
+          }
+          if (!homeOk) {
+            // 连主界面都回不去 ⇒ 本任务不可能完成，如实记失败（并抓现场）。
+            Utils.log('error', `   ✗ [${tag}] ${PREP_HOME_TRIES} 次都没能确认回到主界面` +
+              `（最后场景=${homeLast}）→ **一次都没能导航**，记为本任务未完成`);
+            ctx.captureFailure(-1, `秘境导航失败[${tag}·回不到主界面]`);
+            navFailStreak++;
+            ctx.stepResult(false);
+            return { ok: false, navTry: 0, streak: navFailStreak, reason: 'no-home' };
+          }
+
+          // ── ② 导航闸门：只对"真的点了入口"的失败计数 ───────────────────────
+          let navNoHome = false;   // 本轮是否因"前置不满足"而中断（用于避免重复记失败）
           for (let navTry = 1; navTry <= 2; navTry++) {
             if (navTry > 1) {
               Utils.log('warn', `   ↻ [${tag}] 第 ${navTry} 次导航尝试（上次没进第 2 场景）`);
-              // ★ v0.6.68：回主界面**必须确认成功**才继续往下点入口。
-              //   缺陷（2026-10-15 实跑）：原来这里直接 `await ctx.home()` 不看结果，
-              //   于是 18:06:47 日志已经写着「未能确认回到主界面（最后场景=其它页）」，
-              //   18:07:00 却照样去点秘境入口 —— **在一个未知画面上盲点**，
-              //   点到什么全凭运气。这就是"木叶赛事"等无关页面被点开、
-              //   以及一连串「没看到右上角红叉」的直接原因。
-              //   ⚠ 不能把"回不去"当成导航失败来记（会误伤偶发降级，见 v0.6.65 说明），
-              //     这里只是**不继续**，让循环自然走到"放弃导航"分支。
               const hr = await ctx.home();
-              if (!hr || hr.sc !== SCENE.HOME) {
-                Utils.log('warn', `   ⚠ [${tag}] 回主界面未确认（场景=${hr && hr.sc}）` +
-                  ` → **不继续点秘境入口**（在未知画面上点会误触其它玩法）`);
-                continue;
-              }
-            } else {
-              // 首次导航前同样要确认在主界面：否则「拖到最右并点秘境入口」
-              // 那两下可能落在完全无关的页面上。
-              const hr0 = await ctx.home();
-              if (!hr0 || hr0.sc !== SCENE.HOME) {
-                Utils.log('warn', `   ⚠ [${tag}] 起点不在主界面（场景=${hr0 && hr0.sc}）` +
-                  ` → 先不点秘境入口，回主界面重来`);
-                continue;
+              if (!hr || typeof hr !== 'object' || hr.sc !== SCENE.HOME) {
+                Utils.log('warn', `   ⚠ [${tag}] 重试前回主界面未确认` +
+                  `（场景=${(hr && typeof hr === 'object' && 'sc' in hr) ? hr.sc : '(goHome 无返回)'}）` +
+                  ` → 本轮不点秘境入口`);
+                navNoHome = true;
+                break;      // 前置不满足 ⇒ 结束闸门，走下面的失败记录（不再空转）
               }
             }
             await ctx.replaySeq(SECRET_REALM_NAV_ENTRY, { label: `[${tag}] 导航①拖到最右并点秘境入口` });
@@ -8891,6 +8919,13 @@ const MissionHall = {
             await ctx.replaySeq(SECRET_REALM_NAV_AFTER, { label: `[${tag}] 导航②进入秘境准备界面` });
             navFailStreak = 0;                     // ★ v0.6.65：成功即清零
             return { ok: true, navTry };
+          }
+
+          // ⚠ v0.6.69：若上面是因为「前置不满足」而 break 的（未发生任何真实导航），
+          //   失败已经在前置分支里记过了，这里**不能再记一次**（否则 navFailStreak 翻倍、
+          //   stepResult(false) 重复记，把一次失败算成两次）。
+          if (navNoHome) {
+            return { ok: false, navTry: 0, streak: navFailStreak, reason: 'no-home-mid' };
           }
           Utils.log('warn', `   ⚠ [${tag}] 连续 2 次都没进入第 2 场景 → 放弃导航`);
           navFailStreak++;                         // ★ v0.6.65：累计连续失败
