@@ -55,7 +55,12 @@ const nav = bodyOf('const realmNavGated = async (tag) =>');
 t('找到 realmNavGated', nav.length > 200);
 t('首次导航前校验起点在主界面', has(/起点不在主界面/));
 t('重试分支校验回主界面成功', has(/回主界面未确认/));
-t('校验用 sc !== SCENE.HOME 判据', /hr0?\.sc !== SCENE\.HOME/.test(nav) || has(/!hr0? \|\| hr0?\.sc !== SCENE\.HOME/));
+// ⚠ v0.6.72：这条原来是「校验用 sc !== SCENE.HOME 判据」——
+//   但 `hr.sc !== SCENE.HOME` 正是 bug 本身：goHome() 返回 **boolean**，
+//   `typeof boolean !== 'object'` 恒真 ⇒ 该判据永远判"没回主界面"。
+//   断言旧写法等于**把 bug 钉死**，所以改为断言正确的判定方式。
+t('校验用 goHome 的 boolean 契约（或场景探针）判是否在主界面',
+  /typeof hr0? === 'boolean'/.test(nav) || /byScene|sceneNow/.test(nav));
 t('未确认时不再往下点入口',
   // ⚠ v0.6.69 改过实现：原来用 continue 跳过，现在改为独立前置循环 + break + 记失败。
   //   断言"用的是哪个关键字"会随重构失效 —— 这里断言**意图**：

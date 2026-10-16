@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         火影忍者云游戏自动化
 // @namespace    https://github.com/yu7398133/naruto-auto
-// @version      0.6.70
+// @version      0.6.72
 // @description  火影忍者手游云游戏自动化脚本，多 SDK 适配（Oprate / _START_ARM_CG_ / TCGSDK / gamematrix）+ 视觉场景检测 + 任务调度；面板默认收起为悬浮球，运行时自动隐藏防遮挡
 // @author       naruto-auto
 // @match        https://start.qq.com/*
@@ -24,7 +24,7 @@
   // ============================================================
   //  常量
   // ============================================================
-  const VERSION = '0.6.70'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
+  const VERSION = '0.6.72'; // ⚠ 改版必须与头部 @version 同步（面板标题 v${VERSION} 用这个）
   const BASE_W = 1280;
   const BASE_H = 720;
   const STORAGE_PREFIX = 'naruto_auto_';
@@ -8951,10 +8951,25 @@ const MissionHall = {
           let homeOk = false, homeLast = null;
           for (let t = 1; t <= PREP_HOME_TRIES && !homeOk; t++) {
             const hr = await ctx.home();
-            // ⚠ ctx.home() 在 goHome 超时时会返回 `false`（不是 {sc}），
-            //   此时 hr.sc 是 undefined —— 要显示成人话，不能把 undefined 直接抛给用户。
-            homeLast = (hr && typeof hr === 'object' && 'sc' in hr) ? hr.sc : '(goHome 无返回，多半是超时)';
-            if (hr && typeof hr === 'object' && hr.sc === SCENE.HOME) { homeOk = true; break; }
+            // ★★ v0.6.72 修复（v0.6.69 引入的回归，2026-10-16 15:35 实跑暴露）：
+            //   上面 v0.6.69 那段修复自己带了新 bug —— 它把 ctx.home() 当成 `{sc}` 对象读：
+            //       if (hr && typeof hr === 'object' && hr.sc === SCENE.HOME) { homeOk = true; }
+            //   但 **ctx.home() 直接透传 nav.goHome()，返回的是 boolean**：
+            //       goHome(): `return true` / `return false` / 末尾 `return ok`
+            //   ⇒ typeof true === 'boolean' ≠ 'object' ⇒ 条件**永远为假** ⇒ homeOk 永不为 true。
+            //   实跑症状：3 次全报「回主界面未确认（场景=(goHome 无返回，多半是超时)）」，
+            //   一次秘境入口都没点，任务直接判失败。而同一行日志却写着
+            //     `场景=home 亮度=113.7 命中探针=[friendsIcon=46 mailNav=30 ...]`
+            //   —— **detect() 明明看到了主界面**，是这段检查把"成功"当成了"失败"。
+            //   修法：认 boolean 契约；同时用场景探针做二次确认（任一为真即算到位）。
+            let sceneNow = null;
+            try { sceneNow = ctx.scenes.detect(false).scene; } catch (e) { sceneNow = null; }
+            const byRet = (typeof hr === 'boolean') ? hr
+              : (hr && typeof hr === 'object' && 'sc' in hr) ? (hr.sc === SCENE.HOME)
+                : null;
+            const byScene = (sceneNow === SCENE.HOME);
+            homeLast = sceneNow != null ? sceneNow : '(场景探测失败)';
+            if (byRet === true || byScene) { homeOk = true; break; }
             Utils.log('warn', `   ⚠ [${tag}] 回主界面未确认（场景=${homeLast}，第 ${t}/${PREP_HOME_TRIES} 次）` +
               ` → 不点秘境入口（在未知画面上点会误触其它玩法）`);
             if (t < PREP_HOME_TRIES) await Utils.sleep(1500);   // 给画面一点时间再复检
@@ -8975,9 +8990,18 @@ const MissionHall = {
             if (navTry > 1) {
               Utils.log('warn', `   ↻ [${tag}] 第 ${navTry} 次导航尝试（上次没进第 2 场景）`);
               const hr = await ctx.home();
-              if (!hr || typeof hr !== 'object' || hr.sc !== SCENE.HOME) {
+              // ★★ v0.6.72：同 ① 处的修复 —— goHome() 返回 **boolean**，不是 {sc}。
+              //   原来 `typeof hr !== 'object'` 对 boolean 恒为真 ⇒ 这条重试前置
+              //   **永远判失败** ⇒ navTry=2 直接被 break 掉，第 2 次导航形同虚设。
+              let sceneNow2 = null;
+              try { sceneNow2 = ctx.scenes.detect(false).scene; } catch (e) { sceneNow2 = null; }
+              const byRet2 = (typeof hr === 'boolean') ? hr
+                : (hr && typeof hr === 'object' && 'sc' in hr) ? (hr.sc === SCENE.HOME)
+                  : null;
+              const homeOk2 = (byRet2 === true) || (sceneNow2 === SCENE.HOME);
+              if (!homeOk2) {
                 Utils.log('warn', `   ⚠ [${tag}] 重试前回主界面未确认` +
-                  `（场景=${(hr && typeof hr === 'object' && 'sc' in hr) ? hr.sc : '(goHome 无返回)'}）` +
+                  `（场景=${sceneNow2 != null ? sceneNow2 : '(场景探测失败)'}）` +
                   ` → 本轮不点秘境入口`);
                 navNoHome = true;
                 break;      // 前置不满足 ⇒ 结束闸门，走下面的失败记录（不再空转）
@@ -9815,9 +9839,92 @@ const MissionHall = {
          */
         const claimArenaRewards = async (tag) => {
           ctx.op.releaseHold();
-          // 🧪 [临时探针 v0.6.65] 取证 A：**点开面板之前**。
-          //   此刻确定在战斗准备界面、面板必然关闭。若这里就读到 3/5（含 30/79），
-          //   则 30/79 属于准备界面自带暗角 —— 提阈值 4→5 才是对的。
+
+          // ★ v0.6.71：点入口前先确认**真的在战斗准备界面**。
+          //
+          //   根因（2026-10-16 07:16 日志实锤）：
+          //     首次进场：点前暗块 3/5 → 点(791,644) → ✓ 面板打开 5/5
+          //     第1批打完：点前暗块 5/5 → 点(795,643) → ⚠ 没打开，画面落到**主界面**
+          //   坐标一直是 [793,642]、位置没变过（用户口径），首次进场能进。
+          //   差别在**时机**：局循环里最后一局走的是
+          //       ctx.fight → 点 k(1137,589) 跳过结算 → sleep(1200) → return
+          //   这 1200ms 之后画面**未必**已经回到准备界面，此时按准备界面的
+          //   坐标去点入口，就点在了别的东西上。
+          //   用户口径：「最后一局打完后，是回到战斗准备界面，这时候需要点奖励面板的入口」。
+          //
+          //   ⇒ 与其假设「打完必然已回准备界面」，不如**等它真回来**。
+          //     判据复用现成的 waitArenaReady（开始对战按钮蓝色高亮 + 红X），
+          //     与局循环里第 10056 行用的是同一个，不是新造的。
+          //
+          //   ★ 用户口径（2026-10-16）：
+          //     「如果没有回到准备界面的救场，可以重头开始整个任务，
+          //       因为重头开始会先回到主场景，重新来走」
+          //     ⇒ 等不到**不硬点**（在错的画面上点入口正是把画面搞乱的元凶），
+          //       而是回主界面 + 重新进场，从头走一遍本任务。
+          //       重走的第一步就是 goHome → 主场景，天然复位。
+          //   ⚠ 这里**不记 stepResult(false)**：这不是任务失败，是路径复位。
+          //     与上面「面板判据判没打开」那个**真失败**分支区分开（那条才记失败）。
+          const ENTRY_READY_WAIT_MS = 6000;
+          let atPrep = (await ctx.waitArenaReady(2500)).ok;
+          if (!atPrep) {
+            Utils.log('warn', `🎁 [${tag}] 点入口前不在战斗准备界面 → 再等 ${ENTRY_READY_WAIT_MS}ms`);
+            const r2 = await ctx.waitArenaReady(ENTRY_READY_WAIT_MS);
+            atPrep = r2.ok;
+            if (atPrep) {
+              Utils.log('info', `🎁 [${tag}] ✓ 已回到战斗准备界面（+${r2.ms}ms）→ 继续点入口`);
+            } else {
+              Utils.log('warn', `🎁 [${tag}] ⚠ 等了 ${ENTRY_READY_WAIT_MS}ms 仍没回到准备界面` +
+                `（why=${r2.why || '-'}）→ 不硬点入口，回主界面重走本任务`);
+              ctx.op.releaseHold();
+              if (await ctx.nav.goHome()) {
+                Utils.log('info', '🎁 ✓ 已回主场景 → 重新进场，从头走一遍本任务');
+                await enterArena(`${tag}·未回到准备界面后重走`);
+                return { opened: false, done: false, restarted: true };
+              }
+              // 连主界面都回不去 ⇒ 这才是环境真坏了，交给外层/下一轮
+              Utils.log('warn', '🎁 ⚠ 回主界面也失败 → 放弃本批（不盲点）');
+              return { opened: false, done: false, restarted: false };
+            }
+          }
+
+          // 🧪 [临时探针 v0.6.69] 取证 A：**点入口之前**这一拍，画面到底是什么。
+          //
+          //  为什么换成存图而不是只记亮度：
+          //    上面 _probeArenaPanelRaw 只记 5 块亮度，而亮度是**代理量** ——
+          //    2026-10-16 我连续两次拿亮度倒推画面，两次都推错（先猜"#5 采到
+          //    面板外"、再猜"打完后自动弹面板"），用户两次纠正。
+          //    亮度相同 ≠ 画面相同：主界面 / 准备界面 / 面板 都可能凑出 5/5。
+          //    ⇒ 直接存**原图**，人眼看图，不再靠数字猜。
+          //
+          //  要回答的问题（用户 2026-10-16 口径）：
+          //    「最后一局打完后是回到战斗准备界面，这时候需要点奖励面板的入口」
+          //    ⇒ 若这一拍真的是准备界面，图里应能看到奖励面板入口按钮；
+          //      若已经是别的界面（如主界面），图里会是另一番景象。
+          //
+          //  复用现成的内存截图机制（_failShotData + 面板「📷 存失败图」按钮）：
+          //    v0.6.65 已定「脚本不自动落盘、只存内存」——用户口径是
+          //    「截图最好不要保存在日志里面…日志只记录放哪儿了就行」。
+          //    这里沿用同一通道，不新造一套。
+          try {
+            const video = document.querySelector('video');
+            const cvv = ctx.vision.ctx.canvas;
+            const c = document.createElement('canvas');
+            if (video && video.videoWidth) {
+              c.width = video.videoWidth; c.height = video.videoHeight;
+              c.getContext('2d').drawImage(video, 0, 0);
+            } else {
+              c.width = cvv.width; c.height = cvv.height;
+              c.getContext('2d').drawImage(cvv, 0, 0);
+            }
+            const name = `naruto-probe-entry-${tag.replace(/[^\w\u4e00-\u9fa5]/g, '')}-${Date.now()}.png`;
+            if (!ctx._failShotData) ctx._failShotData = [];
+            ctx._failShotData.push({ name, url: c.toDataURL('image/png'), w: c.width, h: c.height, at: Date.now() });
+            while (ctx._failShotData.length > FAIL_SHOT_KEEP) ctx._failShotData.shift();
+            Utils.log('warn', `   🧪[探针·入口前] tag=${tag} 已存原图 ${c.width}x${c.height}` +
+              ` → 点面板「📷 存失败图」可导出（${name}）`);
+          } catch (e) {
+            Utils.log('warn', `   🧪[探针·入口前] 存图异常：${e.message}`);
+          }
           ctx.vision._probeArenaPanelRaw('before-click');
           Utils.log('info', `🎁 [${tag}] 打开忍术奖励面板`);
           await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
@@ -9955,7 +10062,11 @@ const MissionHall = {
         //        未领完则照旧进战斗循环（打完再领）。
         //    ⇒ 首次进场与每一批收尾走**同一条**领奖路径，不再有两套行为。
         const peek = await claimArenaRewards('首次进场');
-        if (!peek.opened) {
+        if (peek.restarted) {
+          // ★ v0.6.71：不是失败，是「未回到准备界面 → 回主场景重走」的路径复位。
+          //   此时 enterArena 已重进、人在准备界面 ⇒ 继续往下（不当失败记）。
+          Utils.log('info', '🎁 首次进场：已复位重走 → 继续正常战斗流程');
+        } else if (!peek.opened) {
           Utils.log('warn', '🎁 ⚠ 首次进场连奖励面板都没打开 → 回主界面重新完整执行');
           // ★ v0.6.65：同批尾——真失败，如实记（理由见下方「第 N 批打完后」处注释）
           ctx.stepResult(false);
@@ -10035,6 +10146,12 @@ const MissionHall = {
 
           // ② 本批打完 → 领取奖励（内部会点最右还原界面）
           const cl = await claimArenaRewards(`第 ${batch} 批打完后`);
+          if (cl.restarted) {
+            // ★ v0.6.71：不是失败，是「未回到准备界面 → 回主场景重走」的路径复位。
+            //   已 goHome + enterArena 重进，人在准备界面 ⇒ 接着打下一批即可。
+            Utils.log('info', `🎁 第 ${batch} 批后已复位重走 → 继续第 ${batch + 1} 批`);
+            continue;
+          }
           if (!cl.opened) {
             // ★ v0.6.30（用户口径）：「探测失败就返回主界面，重新完整执行」。
             //   面板没打开说明画面已经不对（打也打不成、领也领不到），

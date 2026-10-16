@@ -9815,9 +9815,44 @@ const MissionHall = {
          */
         const claimArenaRewards = async (tag) => {
           ctx.op.releaseHold();
-          // 🧪 [临时探针 v0.6.65] 取证 A：**点开面板之前**。
-          //   此刻确定在战斗准备界面、面板必然关闭。若这里就读到 3/5（含 30/79），
-          //   则 30/79 属于准备界面自带暗角 —— 提阈值 4→5 才是对的。
+          // 🧪 [临时探针 v0.6.69] 取证 A：**点入口之前**这一拍，画面到底是什么。
+          //
+          //  为什么换成存图而不是只记亮度：
+          //    上面 _probeArenaPanelRaw 只记 5 块亮度，而亮度是**代理量** ——
+          //    2026-10-16 我连续两次拿亮度倒推画面，两次都推错（先猜"#5 采到
+          //    面板外"、再猜"打完后自动弹面板"），用户两次纠正。
+          //    亮度相同 ≠ 画面相同：主界面 / 准备界面 / 面板 都可能凑出 5/5。
+          //    ⇒ 直接存**原图**，人眼看图，不再靠数字猜。
+          //
+          //  要回答的问题（用户 2026-10-16 口径）：
+          //    「最后一局打完后是回到战斗准备界面，这时候需要点奖励面板的入口」
+          //    ⇒ 若这一拍真的是准备界面，图里应能看到奖励面板入口按钮；
+          //      若已经是别的界面（如主界面），图里会是另一番景象。
+          //
+          //  复用现成的内存截图机制（_failShotData + 面板「📷 存失败图」按钮）：
+          //    v0.6.65 已定「脚本不自动落盘、只存内存」——用户口径是
+          //    「截图最好不要保存在日志里面…日志只记录放哪儿了就行」。
+          //    这里沿用同一通道，不新造一套。
+          try {
+            const video = document.querySelector('video');
+            const cvv = ctx.vision.ctx.canvas;
+            const c = document.createElement('canvas');
+            if (video && video.videoWidth) {
+              c.width = video.videoWidth; c.height = video.videoHeight;
+              c.getContext('2d').drawImage(video, 0, 0);
+            } else {
+              c.width = cvv.width; c.height = cvv.height;
+              c.getContext('2d').drawImage(cvv, 0, 0);
+            }
+            const name = `naruto-probe-entry-${tag.replace(/[^\w\u4e00-\u9fa5]/g, '')}-${Date.now()}.png`;
+            if (!ctx._failShotData) ctx._failShotData = [];
+            ctx._failShotData.push({ name, url: c.toDataURL('image/png'), w: c.width, h: c.height, at: Date.now() });
+            while (ctx._failShotData.length > FAIL_SHOT_KEEP) ctx._failShotData.shift();
+            Utils.log('warn', `   🧪[探针·入口前] tag=${tag} 已存原图 ${c.width}x${c.height}` +
+              ` → 点面板「📷 存失败图」可导出（${name}）`);
+          } catch (e) {
+            Utils.log('warn', `   🧪[探针·入口前] 存图异常：${e.message}`);
+          }
           ctx.vision._probeArenaPanelRaw('before-click');
           Utils.log('info', `🎁 [${tag}] 打开忍术奖励面板`);
           await ctx.op.clickNatural(ARENA_REWARD_ENTRY[0], ARENA_REWARD_ENTRY[1], null, '打开奖励面板');
